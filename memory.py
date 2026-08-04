@@ -1414,17 +1414,71 @@ def derive_summary_support(summary, memories):
     return out
 
 
+def thread_text(item):
+    """A thread as text, whichever spelling it arrived in.
+
+    Rows written before threads carried a stamp are bare strings and always
+    will be; folding both spellings here is the alternative to every reader
+    remembering which one it has (AGENTS.md: a guard that must be remembered
+    will be forgotten)."""
+    if isinstance(item, dict):
+        return " ".join(str(item.get("thread") or "").split())
+    return " ".join(str(item or "").split())
+
+
+def fold_threads(threads, at_turn, previous=()):
+    """Stamp each thread with the turn it was first opened.
+
+    AN UNDATED THREAD IS INDISTINGUISHABLE FROM A CURRENT ONE, and that is
+    not hypothetical: "the promised source-code upload has not arrived; the
+    uploaded-files field is still empty" sat in a payload alongside 55
+    uploaded files, and had done for turns. Threads are carried forward by a
+    consolidator that is asked to let resolved detail go and has no way to
+    check; nothing anywhere re-read current state. The prose said "nothing has
+    landed yet" in the same breath.
+
+    A stamp does not resolve the thread — nothing deterministic can, since
+    "is this question still open" is a judgement. It makes the thread say how
+    long it has been making its claim, which is what turns a confident stale
+    sentence into a visibly suspicious one, for the assistant reading it and
+    for the consolidator deciding whether to keep it.
+
+    The stamp SURVIVES a merge: a thread carried forward keeps the turn it was
+    opened on, or age would reset every ten turns and measure nothing."""
+    prior = {}
+    for item in previous or ():
+        text = thread_text(item)
+        if text:
+            prior[text] = int(item.get("since_turn") or at_turn) \
+                if isinstance(item, dict) else int(at_turn)
+    out, seen = [], set()
+    for item in threads or ():
+        text = thread_text(item)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        own = item.get("since_turn") if isinstance(item, dict) else None
+        out.append({"thread": text,
+                    "since_turn": int(own or prior.get(text, at_turn) or 0)})
+    return out
+
+
 def _summary_retrieval_text(summary, key_phrases, unresolved_threads):
     return "\n".join(p for p in (summary or "",
                                  ", ".join(key_phrases or []),
-                                 ", ".join(unresolved_threads or [])) if p)
+                                 ", ".join(thread_text(t) for t
+                                           in (unresolved_threads or []))) if p)
 
 
 def save_memory_summary(summary, *, scope=SCOPE_FIRSTHAND, start_turn_idx=0,
                         end_turn_idx=0, key_phrases=None,
                         unresolved_threads=None, support=None):
     key_phrases = key_phrases or []
-    unresolved_threads = unresolved_threads or []
+    # Folded HERE, where threads enter the store, rather than at each of the
+    # four places that read them.
+    unresolved_threads = fold_threads(
+        unresolved_threads, int(end_turn_idx or 0),
+        previous=get_memory_summary(scope).get("unresolved_threads"))
     embedded = embed_texts_meta(
         [_summary_retrieval_text(summary, key_phrases, unresolved_threads)])
     qi("""INSERT INTO memory_summaries(scope,start_turn_idx,end_turn_idx,
@@ -1462,7 +1516,12 @@ def get_memory_summary(scope=SCOPE_FIRSTHAND, *, before_turn_idx=None):
     return {"scope": row["scope"], "start_turn_idx": row["start_turn_idx"],
             "end_turn_idx": row["end_turn_idx"], "summary": row["summary"],
             "key_phrases": _json_list(row["key_phrases"]),
-            "unresolved_threads": _json_list(row["unresolved_threads"])}
+            # Folded on read as well as on write: rows already in the table
+            # are bare strings, and a reader that had to ask which it was
+            # holding is exactly the guard that gets forgotten. An unstamped
+            # thread takes its window's own end turn — it existed by then.
+            "unresolved_threads": fold_threads(
+                _json_list(row["unresolved_threads"]), row["end_turn_idx"])}
 
 
 def search_memory_summaries(query, k=_SUMMARY_RECALL_LIMIT, *,
@@ -1523,7 +1582,17 @@ def consolidate_memory(current_turn_idx, consolidator):
     start_turn = min(m["turn_idx"] for m in memories)
     end_turn = max(m["turn_idx"] for m in memories)
     result = consolidator({
-        "previous_summary": old,
+        # The threads arrive with their age attached, because the instruction
+        # to let resolved detail go was being given to a reader who could not
+        # tell resolved from merely old. A thread open for thirty turns while
+        # the window below it discusses the thing it says has not happened is
+        # the case this exists to make visible.
+        "previous_summary": {
+            **old,
+            "unresolved_threads": [
+                {"thread": t["thread"], "opened_at_turn": t["since_turn"],
+                 "turns_open": max(0, end_turn - int(t["since_turn"] or 0))}
+                for t in (old.get("unresolved_threads") or [])]},
         # All three scopes, not just first-hand. The prompt orders "merge the
         # previous summary's still-relevant content forward" — and the
         # consolidator was only ever shown the first-hand one, so for
@@ -1758,7 +1827,15 @@ def build_memory_context(current_turn_idx, query_text, *, aspects=None,
         "recalled_old_memories": [project_memory(m, current_turn_idx)
                                   for m in recalled],
         "what_happened_between_us": summary.get("summary") or "",
-        "unresolved_threads": summary.get("unresolved_threads") or [],
+        # Each thread says how long it has been claiming to be unresolved. A
+        # thread is written once and carried forward by a consolidator that
+        # never re-reads the world, so an old one can assert something the
+        # rest of this same payload contradicts; the age is what makes that
+        # legible instead of authoritative.
+        "unresolved_threads": [
+            {"thread": t["thread"],
+             "open_since": _beats_ago(current_turn_idx, t["since_turn"])}
+            for t in (summary.get("unresolved_threads") or [])],
     }
     for scope in (SCOPE_RECEIVED, SCOPE_SURMISE):
         scoped = get_memory_summary(scope, before_turn_idx=current_turn_idx)

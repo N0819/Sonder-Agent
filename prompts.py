@@ -354,9 +354,24 @@ Return ONLY a JSON object:
   "received_summary": "what the user said and what was read in sources (told/read rows only; attribute: 'the user said', 'according to <source>')",
   "surmise_summary": "what the assistant concluded (inferred rows only; keep the hedged phrasing)",
   "key_phrases": ["..."],
-  "unresolved_threads": ["open questions and unfinished business"]
+  "unresolved_threads": ["open questions and unfinished business"],
+  "resolved_threads": ["previous threads you are dropping, quoted as they were"]
 }}
 
 Merge the previous summary's still-relevant content forward; let resolved
 and trivial detail go. Write nothing in a section whose class has no rows —
-an empty string is correct there."""
+an empty string is correct there.
+
+TRIAGE THE PREVIOUS THREADS ONE BY ONE. Each arrives with `turns_open`.
+Carrying a thread forward is a fresh claim that it is still open, so decide
+rather than copy:
+- The window below answers it, or shows the awaited thing arrived, or shows
+  the plan changed — it is resolved. Drop it, and quote it in
+  `resolved_threads` so the drop is on the record.
+- It has been open a long time with nothing in any window touching it — say
+  so in the thread itself ("still no answer on X, untouched since") rather
+  than restating it as though it were fresh.
+- Still genuinely live — carry it forward word for word so its age keeps
+  counting from when it was opened.
+A thread that contradicts what the summary beside it describes is the
+failure this triage exists to prevent; the summary is the newer witness."""

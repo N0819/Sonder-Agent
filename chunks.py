@@ -39,7 +39,7 @@ import re
 import time
 
 import codemap
-from db import q, qi, transaction
+from db import q, qi, state_get, state_put, transaction
 
 # One digest's share of a turn payload. Deliberately far below the argv wall
 # that started this: the wall is a transport limit and this is a thinking
@@ -50,6 +50,17 @@ MAX_EXPAND_CHARS = 24_000
 # Below this a "chunk" is noise — a one-line helper on its own row buys an
 # entry in the list and tells the reader nothing.
 MIN_CHUNK_CHARS = 40
+
+# What one pass over a workspace is allowed to read off disk. Characters, not
+# files, for the reason stated above — and generous, because this bound is not
+# about a model's context. Nothing here reaches a payload; the digest's own
+# budget does that. This exists so a workspace containing a 900 MB dependency
+# tree cannot turn one upload into a ten-minute read.
+INGEST_CHAR_BUDGET = 8_000_000
+# Where the last pass says what it did and what it left out. The record has to
+# live somewhere `digest` can read without walking the filesystem, because
+# `digest` runs on every turn and the walk does not.
+INGEST_STATE_KEY = "chunk_index"
 
 
 # The chunk map shares the WORKSPACE's lifetime, not a session's.
@@ -198,25 +209,66 @@ def put(session_id=WORKSPACE, kind='code', source_ref='', pieces=()):
     return [r[0] for r in rows]
 
 
-def ingest_workspace(session_id=WORKSPACE, max_files=60):
-    """Chunk every source file in a session's workspace. Returns a count."""
+def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
+    """Chunk every source file in the workspace. Returns the chunk count, and
+    records what it did NOT index where `digest` will read it.
+
+    THE SCAR IS THE SAME ONE, POINTED THE OTHER WAY. This bounded by
+    `max_files=60` over a newest-modified-first listing, so the 61st file and
+    everything older simply was not there — no error, no warning, nothing in
+    the payload. The index still announced "N chunks across M sources" in the
+    same confident tone, and an assistant reading it would conclude a symbol
+    was absent from the codebase when it was only absent from the index.
+
+    A silent truncation is worse than a crash. A crash is a fact; a corpus
+    quietly missing its older half produces confident answers about code
+    nobody looked at, and there is nothing in the output to tell them apart.
+    So: the bound is characters (a count of things says nothing about their
+    size — the rule this module opens with), and every file that falls out of
+    it is named, with the reason, in a record the digest carries.
+
+    Newest-modified-first is kept as the order deliberately. It is arbitrary
+    with respect to importance, but recency is the one cheap signal that
+    correlates with what the user is working on, and no ordering is defensible
+    when the drop is silent — which is the half that is fixed here."""
     import workspace
     import os
     root = workspace.session_root(session_id)
-    total = 0
-    for entry in workspace.list_files(session_id)[:max_files]:
+    total, indexed, spent = 0, 0, 0
+    skipped = []
+    for entry in workspace.list_files(session_id):
         path = entry["path"]
         language = codemap.language_of(os.path.basename(path))
         if not language:
+            # Recorded, not skipped in silence. A reader comparing "56 files"
+            # against "52 sources" and finding four unaccounted for cannot
+            # tell a file this index does not handle from one it lost, and
+            # spent a scout asking. The walked count minus the skipped count
+            # is the indexed count, or the numbers are not checkable.
+            skipped.append({"path": path, "why": "no recognised language"})
+            continue
+        # Checked BEFORE the read, so the first file is always indexed however
+        # large it is: a workspace holding one enormous file must not index
+        # nothing at all.
+        if spent >= budget:
+            skipped.append({"path": path, "why": "index budget spent"})
             continue
         try:
             with open(os.path.join(root, path), "r", encoding="utf-8") as fh:
                 source = fh.read()
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as exc:
+            skipped.append({"path": path, "why": type(exc).__name__})
             continue
         if not source.strip():
+            skipped.append({"path": path, "why": "empty"})
             continue
+        spent += len(source)
+        indexed += 1
         total += len(put(session_id, "code", path, split_code(source, language)))
+    state_put(INGEST_STATE_KEY, {
+        "indexed_sources": indexed, "chunks": total,
+        "read_chars": spent, "budget_chars": budget,
+        "skipped_count": len(skipped), "skipped": skipped[:40]})
     return total
 
 
@@ -323,10 +375,11 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
     # what the turn is actually about. The list stays in source order for
     # anything the query does not discriminate on, so an empty query behaves
     # exactly as before rather than shuffling.
-    ranked = rows
+    ranked, matched = rows, 0
     if query:
         scored = [(_relevance(query, r), -i, r) for i, r in enumerate(rows)]
         scored.sort(key=lambda s: (-s[0], -s[1]))
+        matched = sum(1 for score, _i, _r in scored if score > 0)
         ranked = [r for score, _i, r in scored if score > 0] + \
                  [r for score, _i, r in scored if score <= 0]
     entries, spent, shown = [], 0, 0
@@ -340,15 +393,33 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
         shown += 1
         entries.append(line)
     sources = sorted({r["source_ref"] for r in rows})
+    index = state_get(INGEST_STATE_KEY) or {}
+    dropped = index.get("skipped") or []
     return {
         # Pinned: what the whole thing IS, before any of the parts.
         "summary": summary or (
             f"{len(rows)} chunks across {len(sources)} sources"
             + (": " + ", ".join(sources[:8]) if sources else "")
-            + ("…" if len(sources) > 8 else "")),
+            + ("…" if len(sources) > 8 else "")
+            + (f" — {index.get('skipped_count')} file(s) in the workspace are "
+               "NOT in this index, listed under `not_indexed`"
+               if index.get("skipped_count") else "")),
         "total_chunks": len(rows),
         "showing": shown,
+        # HOW the shown entries were chosen, not just how many. A ranked list
+        # degrades gracefully and an arbitrary slice hides whole modules, and
+        # from inside the payload the two are indistinguishable — a reader who
+        # cannot tell them apart cannot know whether "not in the list" means
+        # "not relevant" or "not looked at".
+        "selection": (
+            f"ranked by relevance to this turn; {matched} of {len(rows)} "
+            "chunks matched at least one term, the rest follow in source order"
+            if query else "source order — nothing was given to rank against"),
         "entries": entries,
+        # Named, not counted. "3 files were skipped" tells a reader something
+        # is missing and not whether it is the one they are about to
+        # conclude does not exist.
+        **({"not_indexed": dropped} if dropped else {}),
         **({"expanded": expand(session_id, expand_ids)} if expand_ids else {}),
         "how_to_use_this": (
             "A LIST, not the material. Each entry is a gist and an id; the "
@@ -356,5 +427,7 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
             "them in `expand_chunks` to see them next round. `showing` below "
             "`total_chunks` means you are looking at part of the list and "
             "there is more to ask for — say so rather than concluding from "
-            "the sample."),
+            "the sample. Anything under `not_indexed` is a file in the "
+            "workspace that this index does NOT cover: absent from the list "
+            "is not evidence of absent from the code."),
     }

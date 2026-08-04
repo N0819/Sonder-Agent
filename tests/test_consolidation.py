@@ -156,3 +156,78 @@ def test_summary_cutoff_respected_on_read(temp_db):
     assert got["summary"] == ""
     got = memory.get_memory_summary(before_turn_idx=10)
     assert "pottery" in got["summary"]
+
+
+# ---- A thread that is carried forward is making a fresh claim ----
+
+def test_a_carried_thread_keeps_the_turn_it_was_opened_on(temp_db):
+    """THE STALE-NARRATIVE DEFECT. `unresolved_threads` held "the promised
+    source-code upload has not arrived; the uploaded-files field is still
+    empty" in the same payload as 55 uploaded files, and had for turns. The
+    consolidator is told to let resolved detail go and has no way to check;
+    nothing re-reads current state.
+
+    Nothing deterministic can resolve a thread — "is this still open" is a
+    judgement. What code can do is refuse to let the thread hide its age. The
+    stamp has to SURVIVE the merge, or age resets every window and measures
+    nothing."""
+    memory.save_memory_summary("early", start_turn_idx=1, end_turn_idx=4,
+                               unresolved_threads=["the upload has not landed"])
+    first = memory.get_memory_summary()
+    assert first["unresolved_threads"][0]["since_turn"] == 4
+
+    # The same thread, word for word, carried into a much later window.
+    memory.save_memory_summary("later", start_turn_idx=5, end_turn_idx=40,
+                               unresolved_threads=["the upload has not landed",
+                                                   "a genuinely new question"])
+    threads = {t["thread"]: t["since_turn"]
+               for t in memory.get_memory_summary()["unresolved_threads"]}
+    assert threads["the upload has not landed"] == 4, "the stamp reset"
+    assert threads["a genuinely new question"] == 40
+
+
+def test_the_turn_payload_says_how_long_a_thread_has_been_open(temp_db):
+    """A stale thread reads as authoritative right up until you can see its
+    age beside it. The assistant is the reader that has to weigh it against
+    the rest of the payload, so the age has to reach the payload."""
+    _seed(1, "witnessed", "we talked about the upload")
+    memory.save_memory_summary("early", start_turn_idx=1, end_turn_idx=3,
+                               unresolved_threads=["the upload has not landed"])
+    payload, _internal = memory.build_memory_context(40, "what is left open?")
+    thread = payload["unresolved_threads"][0]
+    assert thread["thread"] == "the upload has not landed"
+    assert "37 turns ago" in thread["open_since"]
+
+
+def test_the_consolidator_is_told_each_thread_s_age(temp_db):
+    """It was being asked to drop what was resolved while shown nothing that
+    would distinguish resolved from merely old."""
+    memory.save_memory_summary("early", start_turn_idx=1, end_turn_idx=2,
+                               unresolved_threads=["the old rollout question"])
+    for turn in range(3, 9):
+        _seed(turn, "witnessed", f"turn {turn} happened")
+    seen = {}
+
+    def spy(payload):
+        seen.update(payload)
+        return _consolidator(payload)
+
+    memory.consolidate_memory(8, spy)
+    threads = seen["previous_summary"]["unresolved_threads"]
+    assert threads[0]["opened_at_turn"] == 2
+    assert threads[0]["turns_open"] == 6
+
+
+def test_a_legacy_thread_written_as_a_bare_string_still_reads(temp_db):
+    """Every thread already in the table is a bare string and always will be.
+    A reader that had to ask which spelling it was holding is the guard that
+    gets forgotten, so both fold at the door."""
+    from db import qi
+    qi("INSERT INTO memory_summaries(scope,start_turn_idx,end_turn_idx,summary,"
+       "key_phrases,unresolved_threads,support,embedding,embedding_model,"
+       "embedding_dim,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+       (memory.SCOPE_FIRSTHAND, 1, 7, "old row", "[]",
+        '["a thread from before the stamp"]', "[]", b"", "", 0, 0.0))
+    threads = memory.get_memory_summary()["unresolved_threads"]
+    assert threads == [{"thread": "a thread from before the stamp",
+                        "since_turn": 7}]

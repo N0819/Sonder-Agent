@@ -112,6 +112,23 @@ def list_hypotheses(status=None, limit=50):
     return [get_hypothesis(r["id"]) for r in rows]
 
 
+def evidence_tally(hid):
+    """How many rows of each stance are behind a hypothesis's confidence.
+
+    A NUMBER WITHOUT ITS DENOMINATOR IS UNREADABLE. Four open hypotheses were
+    once shown at confidence 0.545 apiece and read, reasonably, as four
+    questions sharing an untouched default — the one thing that would have
+    settled it, that each had received exactly one supporting row, was not in
+    the payload. 0.3 + 0.35 * (1 - 0.3) is 0.545: identical values from
+    identical starting points and identical arithmetic, which is the
+    mechanism working, and indistinguishable from the mechanism never having
+    fired. `evidence: {}` and `evidence: {"supports": 1}` are the difference,
+    and both are worth knowing."""
+    return {r["stance"]: r["c"] for r in q(
+        "SELECT stance, COUNT(*) AS c FROM evidence WHERE hypothesis_id=? "
+        "GROUP BY stance", (hid,))}
+
+
 def _evidence_ref(row_id):
     return f"ev:{row_id}"
 

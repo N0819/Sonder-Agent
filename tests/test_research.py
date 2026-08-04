@@ -216,3 +216,59 @@ def test_dispute_against_old_evidence_memory(temp_db):
     assert "eight thousand" in row["content"]
     assert memory._row_memory(row)["disputed"]["reading"].startswith(
         "That was v1")
+
+
+def test_a_confidence_travels_with_the_evidence_that_moved_it(temp_db):
+    """A NUMBER WITHOUT ITS DENOMINATOR IS UNREADABLE. Four open hypotheses
+    were shown at 0.545 apiece and read, reasonably, as four questions sharing
+    an untouched default. They were not: 0.3 + 0.35 * (1 - 0.3) is 0.545, so
+    each had received exactly one supporting row and the identical values were
+    the arithmetic working. The one fact that would have settled it — the
+    count — was not in the payload, and a mechanism that fired looks exactly
+    like one that never ran."""
+    hid = research.open_hypothesis("does the cap already bite?", turn_idx=1)["id"]
+    assert research.evidence_tally(hid) == {}, "an untouched hypothesis"
+
+    research.record_evidence(hid, url="https://example.com/a", title="a",
+                             excerpt="it does", stance="supports", turn_idx=1)
+    assert research.evidence_tally(hid) == {"supports": 1}
+    moved = research.get_hypothesis(hid)["confidence"]
+    assert moved == 0.545, moved       # pins the arithmetic the payload explains
+
+    research.record_evidence(hid, url="https://example.com/b", title="b",
+                             excerpt="it does not", stance="contradicts",
+                             turn_idx=2)
+    assert research.evidence_tally(hid) == {"supports": 1, "contradicts": 1}
+
+
+def test_the_turn_payload_carries_the_tally(temp_db):
+    """The tally is only worth having where the confusion happened, which was
+    in the turn payload and not in a helper nobody calls."""
+    import json
+
+    import pipeline
+    import providers
+
+    hid = research.open_hypothesis("an open question", turn_idx=1)["id"]
+    research.record_evidence(hid, url="https://example.com/a", title="a",
+                             excerpt="supporting", stance="supports",
+                             turn_idx=1)
+    seen = {}
+
+    def capture(system, user):
+        payload = json.loads(user)
+        if "user_message" in payload:
+            seen.update(payload)
+            return json.dumps({"reply": "ok"})
+        return json.dumps({"summary": "", "received_summary": "",
+                           "surmise_summary": "", "key_phrases": [],
+                           "unresolved_threads": []})
+
+    providers.set_chat_stub(capture)
+    try:
+        pipeline.run_turn("anything")
+    finally:
+        providers.set_chat_stub(None)
+    entry = seen["open_research"][0]
+    assert entry["evidence"] == {"supports": 1}
+    assert entry["last_moved_turn"] == 1

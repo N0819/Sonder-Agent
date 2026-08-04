@@ -85,7 +85,8 @@ def _aspects(sheet_entries, threads, persona_sheet):
     return [
         ("what i am wondering about",
          " ".join(e.get("i_suspect", "") for e in sheet_entries[:2])),
-        ("what is still unsettled", " ".join(threads or [])),
+        ("what is still unsettled",
+         " ".join(memory.thread_text(t) for t in (threads or []))),
         ("my standing commitments",
          " ".join(persona_sheet.get("standing_commitments") or [])),
     ]
@@ -314,9 +315,17 @@ def run_turn(user_text, session_id=None, run=None):
         "memory": memory_payload,
         "what_i_believe_about_people_and_topics": user_model,
         "active_hypotheses": sheet_entries,
+        # The tally travels with the confidence, always. A bare number cannot
+        # say whether it moved, and "open at 0.545" reads as an untouched
+        # default until you can see the one supporting row that put it there.
+        # `status` is worth the same care: an experiment whose prediction held
+        # is evidence and moves confidence — it does not close a question, so
+        # "open" after a confirmed run is correct rather than stuck.
         "open_research": [
             {"question": h["question"], "status": h["status"],
-             "confidence": h["confidence"]}
+             "confidence": h["confidence"],
+             "evidence": research.evidence_tally(h["id"]),
+             "last_moved_turn": h["updated_turn"]}
             for h in research.list_hypotheses(status="open", limit=5)],
         # Delivered, not fetched: "how many of which type am I allowed" has
         # to be answerable without spending anything to ask, or the model

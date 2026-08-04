@@ -187,3 +187,90 @@ def test_deliberation_is_bounded(temp_db):
         providers.set_chat_stub(None)
     assert len(calls) == pipeline.DELIBERATION_MAX_ROUNDS
     assert out["reply"] == "never satisfied"
+
+
+# ---- What the index does NOT cover has to be in the index ----
+
+def test_a_file_the_index_skipped_is_named_in_the_digest(temp_db, tmp_path):
+    """THE CRASH POINTED THE OTHER WAY. `ingest_workspace` bounded by
+    `max_files=60` over a newest-modified-first listing, so the 61st file and
+    everything older was simply not indexed — no error, no warning, and the
+    digest still announced "N chunks across M sources" in the same confident
+    tone. An assistant reading that concludes a symbol is absent from the
+    codebase when it is only absent from the index.
+
+    A silent truncation is worse than a crash: a crash is a fact, and a corpus
+    quietly missing half of itself produces confident answers about code
+    nobody looked at."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    for i in range(6):
+        workspace.store_upload(1, f"mod{i}.py",
+                               (f"def f{i}():\n    return {i}\n"
+                                + "# padding\n" * 200).encode())
+    # A budget that cannot fit them all, so the bound actually bites.
+    chunks.ingest_workspace(budget=3_000)
+    digest = chunks.digest(kind="code")
+
+    assert digest["not_indexed"], "a dropped file left no trace"
+    assert all(entry["path"] and entry["why"] for entry in digest["not_indexed"])
+    # And the pinned summary — the part read first — says so, rather than
+    # leaving it to a reader who thinks to scroll.
+    assert "NOT in this index" in digest["summary"]
+    assert "not_indexed" in digest["how_to_use_this"]
+
+
+def test_an_index_within_budget_claims_no_omissions(temp_db, tmp_path):
+    """The other half: a complete index must not cry wolf, or the warning
+    stops carrying information."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "only.py", b"def f():\n    return 1\n")
+    chunks.ingest_workspace()
+    digest = chunks.digest(kind="code")
+    assert "not_indexed" not in digest
+    assert "NOT in this index" not in digest["summary"]
+
+
+def test_a_digest_says_how_it_chose_what_to_show(temp_db):
+    """`showing: 50 of 884` told a reader the list was partial and nothing
+    about how the 50 were picked — and a relevance rank and an arbitrary slice
+    are indistinguishable from inside the payload while failing completely
+    differently. A rank degrades gracefully; a slice hides whole modules. Not
+    knowing which, a reader cannot tell "not in the list" from "not looked
+    at"."""
+    chunks.put(1, "code", "alpha.py",
+               chunks.split_code("def embeddings_rebuild():\n"
+                                 '    """Rebuild them."""\n    return 1\n',
+                                 "python"))
+    chunks.put(1, "code", "beta.py",
+               chunks.split_code("def unrelated_helper():\n"
+                                 '    """Something else."""\n    return 2\n',
+                                 "python"))
+    ranked = chunks.digest(kind="code", query="embeddings rebuild")
+    assert "ranked by relevance" in ranked["selection"]
+    assert "1 of 2" in ranked["selection"]
+    assert ranked["entries"][0]["source"] == "alpha.py"
+
+    unranked = chunks.digest(kind="code")
+    assert "source order" in unranked["selection"]
+
+
+def test_the_walked_count_and_the_indexed_count_reconcile(temp_db, tmp_path):
+    """A scout was spent asking why a workspace held 53 chunkable files while
+    the index reported 52 sources. Files this index does not handle were
+    dropped in silence, so the two numbers could not be reconciled from
+    outside and the gap read as loss."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "real.py", b"def f():\n    return 1\n")
+    workspace.store_upload(1, "requirements.txt", b"fastapi\n")
+    workspace.store_upload(1, "Makefile", b"test:\n\tpytest\n")
+    chunks.ingest_workspace()
+
+    from db import state_get
+    index = state_get(chunks.INGEST_STATE_KEY)
+    walked = len(workspace.list_files())
+    assert index["indexed_sources"] + index["skipped_count"] == walked
+    assert {e["path"] for e in index["skipped"]} == {"requirements.txt",
+                                                     "Makefile"}
