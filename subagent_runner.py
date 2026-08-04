@@ -116,14 +116,24 @@ def main():
     context = str(task_payload.get("context") or "")
     given_map = task_payload.get("codemap") or {}
 
-    # The parent's uploaded files, copied into the child's own workspace so
-    # the child's sandbox can run against them. A copy, not a share: the
-    # child must not be able to modify what the parent holds.
-    files = task_payload.get("files") or {}
-    if isinstance(files, dict):
-        for relative, text in list(files.items())[:400]:
-            workspace.store_upload(1, str(relative).replace("/", "_"),
-                                   str(text).encode("utf-8", "replace"))
+    # The parent's files are ALREADY on disk, written straight into this
+    # child's ASSISTANT_WORKSPACE before it was launched. They used to arrive
+    # inside `task_payload` — every body, in the child's model context, ~215k
+    # tokens for a 119-file tree — and this loop unpacked them back onto the
+    # disk they could have been written to directly.
+    #
+    # A copy, not a share, exactly as before: the child's workspace is inside
+    # its own temp home, so it cannot modify what the parent holds.
+    #
+    # Mapping rather than reading is the point. The child gets the same
+    # gist-and-id contract as the parent: chunk it, navigate it, expand what
+    # it needs. A subagent that reads its whole corpus to answer one question
+    # is not cheaper than the parent doing it.
+    try:
+        import chunks
+        chunks.ingest_workspace()
+    except Exception:
+        pass          # a child that cannot map still has its codemap
 
     # THE ONE PLACE THE UNSATISFIABLE-DRIVE RULE IS DELIBERATELY SUSPENDED.
     #

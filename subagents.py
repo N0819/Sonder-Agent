@@ -992,14 +992,34 @@ def _run_deep(task, *, session_id=None, context="", turn_idx=0,
     home = tempfile.mkdtemp(prefix="assistant-subagent-")
     seeded = os.path.join(home, "given")
     os.makedirs(seeded, exist_ok=True)
-    if session_id is not None:
-        _seed(seeded, workspace.snapshot_for_sandbox(session_id))
+    snapshot = (workspace.snapshot_for_sandbox(session_id)
+                if session_id is not None else {})
+    if snapshot:
+        _seed(seeded, snapshot)
+        # SEEDED ON DISK, NOT THROUGH THE PAYLOAD.
+        #
+        # `files` used to carry every body in this dict into `task_payload`,
+        # which is the child's model context. Measured on a 119-file
+        # workspace: 78 files, 859,445 characters, ~215k tokens — the entire
+        # source tree, in a single prompt, before the child had done
+        # anything. That is the crash.
+        #
+        # The dict was load-bearing, which is why deleting it is not the fix:
+        # the runner used it to populate the child's own workspace, since the
+        # child runs with its own ASSISTANT_WORKSPACE in this temp directory.
+        # But the parent knows that path — it sets it below — so it can write
+        # the files there directly. The child ends up with exactly the same
+        # workspace and none of it in its context.
+        #
+        # What the child gets in the payload instead is the MAP: the same
+        # gist-and-id contract the parent works under. A subagent that reads
+        # its whole corpus to answer one question is not cheaper than the
+        # parent doing it.
+        _seed(os.path.join(home, "workspace"), snapshot)
     task_payload = {
         "task": task,
         "context": context[:8000],
         "max_turns": DEEP_MAX_TURNS,
-        "files": (workspace.snapshot_for_sandbox(session_id)
-                  if session_id is not None else {}),
         # The map, and the project's own instructions if it carries any.
         # Handed over at the start so the child never has to spend a turn
         # discovering the shape of what it was given.
@@ -1008,13 +1028,28 @@ def _run_deep(task, *, session_id=None, context="", turn_idx=0,
         # child gets a fresh database by design, and provider settings live
         # in that database — so without this the child fell back to the
         # environment defaults and reported "no language model configured"
-        # while cheerfully consuming its grant. Secrets are not carried:
-        # config stores the NAME of an env var and the subprocess inherits
-        # the environment, so the key resolves in the child without ever
-        # being serialised into this payload.
-        "provider_config": config.get_config(),
+        # while cheerfully consuming its grant.
+        #
+        # THE KEY VALUES ARE STRIPPED AND PASSED THROUGH THE ENVIRONMENT.
+        # This used to be `config.get_config()` with a comment promising that
+        # secrets were never serialised here — true when a settings row could
+        # only hold the NAME of an env var, and false the moment
+        # `config.KEY_VALUE_FIELDS` let a credential be stored outright. The
+        # child's runner writes whatever it is handed straight into its own
+        # database (`config.save_config`), and `archive_run` tars the child's
+        # entire home directory afterwards — so a stored key would have come
+        # to rest in a .tar.gz on disk, in a file whose whole purpose is to
+        # be kept and read later. A comment asserting an invariant is not the
+        # same as enforcing it; this enforces it.
+        "provider_config": _provider_config_without_secrets(),
     }
     env = dict(os.environ)
+    # The credential travels here instead: process environment, inherited by
+    # the child, never written to its database and never archived.
+    for field, variable in _SUBAGENT_KEY_VARS.items():
+        secret = config.secret_for(field)
+        if secret:
+            env[variable] = secret
     env["ASSISTANT_DB"] = os.path.join(home, "subagent.db")
     env["ASSISTANT_WORKSPACE"] = os.path.join(home, "workspace")
     proc = subprocess.Popen(
@@ -1045,6 +1080,28 @@ def _run_deep(task, *, session_id=None, context="", turn_idx=0,
         if archived and isinstance(report, dict):
             report["archive_id"] = archived
         shutil.rmtree(home, ignore_errors=True)
+
+
+# Where a stripped key is handed to a child instead. Names chosen to be the
+# ones `config._DEFAULTS` already falls back to, so a child that reads them is
+# reading its ordinary configuration rather than a special case.
+_SUBAGENT_KEY_VARS = {"chat_key_env": "ASSISTANT_CHAT_KEY",
+                      "embed_key_env": "ASSISTANT_EMBED_KEY"}
+
+
+def _provider_config_without_secrets():
+    """The parent's provider settings with every stored credential removed
+    and the key-name fields pointed at `_SUBAGENT_KEY_VARS`.
+
+    Stripped by iterating `config.KEY_VALUE_FIELDS` rather than by naming
+    fields here: a credential field added later is removed by default instead
+    of leaking because this function was not updated."""
+    cfg = dict(config.get_config())
+    for field in config.KEY_VALUE_FIELDS:
+        cfg[field] = ""
+    for field, variable in _SUBAGENT_KEY_VARS.items():
+        cfg[field] = variable
+    return cfg
 
 
 def _seed(root, files):

@@ -64,6 +64,23 @@ MIN_CHUNK_CHARS = 40
 WORKSPACE = 0
 
 
+def _scope(_ignored=None):
+    """Always the workspace. The argument is accepted and discarded.
+
+    A DEFAULT WAS NOT ENOUGH, and the failure is the reason this function
+    exists. Making `session_id` default to WORKSPACE left four call sites
+    still passing a live session id, so the map was written at scope 0 and
+    read at scope N: `digest` returned "0 chunks across 0 sources" while 777
+    rows sat in the table, and `expand` could not resolve an id even if one
+    had been offered. Silent, total, and invisible from either end.
+
+    That is the identity lesson from AGENTS.md, arrived at from the other
+    direction — two spellings of one scope existed, so they had to be folded
+    where the data enters rather than at each caller who must remember. A
+    guard that must be remembered will be forgotten; this one cannot be."""
+    return WORKSPACE
+
+
 def _key(session_id, source_ref, ordinal):
     """A short, stable handle the model can name back at us.
 
@@ -156,7 +173,7 @@ def put(session_id=WORKSPACE, kind='code', source_ref='', pieces=()):
     edited must not leave the old version's chunks alongside the new ones,
     which is the failure mode where an expand returns code that no longer
     exists."""
-    session_id = int(session_id or 0)
+    session_id = _scope(session_id)
     rows = []
     for ordinal, piece in enumerate(pieces):
         body = str(piece.get("body") or "")
@@ -209,13 +226,14 @@ def expand(session_id=WORKSPACE, ids=(), budget=MAX_EXPAND_CHARS):
     An id that does not resolve comes back as an explicit `unknown` entry
     rather than being dropped: silence would read to the assistant as "that
     chunk was empty", and it would carry on as though it had looked."""
+    session_id = _scope(session_id)
     wanted = [str(i).strip() for i in (ids or []) if str(i).strip()][:24]
     if not wanted:
         return []
     rows = {r["chunk_key"]: r for r in q(
         "SELECT chunk_key,kind,source_ref,title,gist,body,start_line,end_line "
         "FROM chunks WHERE session_id=? AND chunk_key IN (%s)"
-        % ",".join("?" * len(wanted)), (int(session_id or 0), *wanted))}
+        % ",".join("?" * len(wanted)), (session_id, *wanted))}
     out, spent = [], 0
     for key in wanted:
         row = rows.get(key)
@@ -292,7 +310,7 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
     This is the payload shape the whole module exists for. Everything in it is
     bounded, and every bound that bites is stated in the payload rather than
     applied silently."""
-    session_id = int(session_id or 0)
+    session_id = _scope(session_id)
     args = [session_id]
     sql = "SELECT chunk_key,kind,source_ref,title,gist,chars FROM chunks " \
           "WHERE session_id=?"

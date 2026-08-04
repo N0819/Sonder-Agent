@@ -218,12 +218,34 @@ def store_upload(session_id, filename, data):
             "bytes": len(data)}
 
 
-def list_files(session_id):
+# Directories that are machinery, not material.
+#
+# `.git` alone contributed 60-odd entries to a 119-"file" workspace — object
+# files and refs, counted in the totals, walked by the chunk mapper, listed
+# back to the assistant as things it might want to read. None of it is the
+# code the user handed over, all of it competes with the code for attention,
+# and git objects are compressed binary that chunk into noise.
+#
+# `codemap` has had its own `_SKIP_DIRS` since before this module existed;
+# the mistake was that `list_files` never consulted one. Same set, one
+# meaning — the module that already knew is the one to ask.
+_SKIP_WALK_DIRS = frozenset(codemap._SKIP_DIRS) | {
+    ".git", ".hg", ".svn", ".pytest_cache", "__pycache__", ".mypy_cache",
+    ".ruff_cache", ".tox", "node_modules", ".venv", "venv",
+}
+
+
+def list_files(session_id=None):
     """Everything in the workspace, newest first, with paths relative to the
-    session root so nothing absolute reaches the browser."""
+    workspace root so nothing absolute reaches the browser.
+
+    Machinery directories are skipped — see `_SKIP_WALK_DIRS`."""
     root = session_root(session_id)
     out = []
-    for dirpath, _dirs, files in os.walk(root):
+    for dirpath, dirs, files in os.walk(root):
+        # Pruned IN PLACE, which is what stops os.walk descending into them
+        # at all rather than filtering their contents afterwards.
+        dirs[:] = [d for d in dirs if d not in _SKIP_WALK_DIRS]
         for name in files:
             full = os.path.join(dirpath, name)
             try:
@@ -436,6 +458,11 @@ def list_dir(relative="", limit=200):
             truncated = True
             break
         full = os.path.join(target, name)
+        # The same skip set the walker uses. Navigation that offers `.git` as
+        # somewhere to go is navigation into machinery, and the assistant has
+        # no way to know from the name that it is a dead end.
+        if os.path.isdir(full) and name in _SKIP_WALK_DIRS:
+            continue
         rel = os.path.relpath(full, root)
         if os.path.isdir(full):
             try:
