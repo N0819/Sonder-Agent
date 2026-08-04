@@ -8,6 +8,8 @@
 
 import json
 
+import pytest
+
 import pipeline
 import providers
 import turnrun
@@ -124,3 +126,66 @@ def test_a_watched_turn_reports_the_stages_it_ran(temp_db):
     assert "recall" in stages and "respond" in stages and "commit" in stages
     assert events[-1]["status"] == "done"
     assert events[-1]["result"]["reply"] == "ok"
+
+
+# ---- A subagent must not be a silent gap ----
+
+def test_a_scout_narrates_itself_to_the_watching_turn(temp_db, monkeypatch):
+    """A subagent was a hole in the reasoning panel. The turn went quiet for
+    up to DEEP_TIMEOUT — or four model calls for a scout — with no way to
+    tell work from a hang, and the parent could see every step the whole
+    time."""
+    import subagents
+    run = turnrun.create("investigate", None)
+    turnrun.bind(run)
+    calls = []
+
+    def fake_chat(system, user):
+        calls.append(1)
+        if len(calls) == 1:
+            return json.dumps({"action": "search", "query": "buildkite docs"})
+        return json.dumps({"action": "report",
+                           "report": {"summary": "found it", "claims": []}})
+
+    monkeypatch.setattr(subagents, "chat_complete", fake_chat)
+    monkeypatch.setattr(subagents.tools_web, "search", lambda q, **kw: [])
+    try:
+        subagents._run_scout("find the deploy tool", turn_idx=1)
+    finally:
+        turnrun.bind(None)
+    stages = [e for e in run.events if e["stage"] == "subagent"]
+    states = [e["state"] for e in stages]
+    assert "started" in states and "search" in states and "reported" in states
+    assert all(e["kind"] == "scout" for e in stages)
+    # The task travels with every line, or a two-agent turn is unreadable.
+    assert all(e["task"] for e in stages)
+
+
+def test_halting_reaches_a_running_scout(temp_db, monkeypatch):
+    """A halt that could only land between subagents would wait out the whole
+    thing — from the button's side, a halt that did nothing."""
+    import subagents
+    run = turnrun.create("investigate", None)
+    turnrun.bind(run)
+    run.request_halt()
+
+    def fake_chat(system, user):
+        raise AssertionError("halted before the first model call")
+
+    monkeypatch.setattr(subagents, "chat_complete", fake_chat)
+    try:
+        with pytest.raises(turnrun.TurnHalted):
+            subagents._run_scout("find something", turn_idx=1)
+    finally:
+        turnrun.bind(None)
+
+
+def test_an_unwatched_subagent_still_runs(temp_db, monkeypatch):
+    """`turnrun.current()` is None for a blocking turn or a test, and the
+    narration must be inert rather than a crash."""
+    import subagents
+    turnrun.bind(None)
+    monkeypatch.setattr(subagents, "chat_complete", lambda s, u: json.dumps(
+        {"action": "report", "report": {"summary": "fine"}}))
+    out = subagents._run_scout("anything", turn_idx=1)
+    assert out["summary"] == "fine"

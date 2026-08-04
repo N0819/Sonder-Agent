@@ -244,17 +244,24 @@ current search results, and how many rounds remain. Choose ONE action.
     "excerpt": "the sentence(s) that actually matter"}}
       Read a page and keep the part that carries the answer. Quote it; do not
       paraphrase it into something the page did not say.
+  {{"action": "read", "chunk_ids": ["c1a2b3", ...],
+    "why": "what you expect to find"}}
+      READ LOCAL CODE. When you were given a `code` map, each entry is a gist
+      and an id; this is how you see the actual lines. Bodies arrive next
+      round. Naming a file is not reading it — a claim about code you only
+      saw the gist of is a guess, and it will be marked unsupported.
   {{"action": "report", "report": {{
       "summary": "what you found, in plain language",
       "claims": [{{"claim": "...", "confidence": 0.0-1.0,
-                  "support": ["<url you actually read>", ...]}}],
+                  "support": ["<url you fetched or chunk id you read>", ...]}}],
       "open_questions": ["..."],
       "could_not_establish": ["what you looked for and did not find"]
   }}}}
 
-Every claim's `support` must name urls you actually fetched this run. A claim
-whose support names nothing you read is kept but marked unsupported, which is
-a worse outcome for you than not making it — so make the claim you can show.
+Every claim's `support` must name a url you actually fetched or a chunk id you
+actually read this run. A claim whose support names nothing you read is kept
+but marked unsupported, which is a worse outcome for you than not making it —
+so make the claim you can show.
 Report as soon as you can answer; the rounds are a ceiling, not a target.
 When you could not establish something, say so in `could_not_establish`. A
 scout that reports the shape of its own ignorance is more useful than one

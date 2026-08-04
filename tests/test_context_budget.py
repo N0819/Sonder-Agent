@@ -30,9 +30,17 @@ import workspace
 
 
 @pytest.fixture
-def ws(tmp_path):
-    """A workspace root of its own, so a test never walks the real one."""
+def ws(tmp_path, monkeypatch):
+    """A workspace root of its own, so a test never walks the real one.
+
+    ARCHIVE_ROOT is redirected for the same reason, and it is not
+    hypothetical: `_run_deep` archives in a `finally`, so exercising it here
+    wrote seven real tarballs into the user's live `subagent-archive/` before
+    this line existed. A test that leaves artefacts in the directory a human
+    audits is a test that corrupts the evidence it exists to protect."""
     workspace.configure(str(tmp_path / "workspaces"))
+    monkeypatch.setattr(subagents, "ARCHIVE_ROOT",
+                        str(tmp_path / "subagent-archive"))
     yield tmp_path
 
 
@@ -170,3 +178,35 @@ def test_a_subagent_payload_carries_no_credential(ws, temp_db):
     # ...and the child is still told where to find one.
     assert payload["chat_key_env"] == "ASSISTANT_CHAT_KEY"
     assert payload["embed_key_env"] == "ASSISTANT_EMBED_KEY"
+
+
+def test_a_scout_can_read_the_code_it_is_sent_at(ws, temp_db, monkeypatch):
+    """Three real scouts investigating this project returned 7 claims with
+    `evidence: 0` and `grounded_claims: 0` between them. Not laziness: a
+    scout's actions were search, fetch-a-URL and report, and a local file is
+    not a URL — so it was handed a map of names it could never open, and
+    every claim it could make about code was a guess about a filename."""
+    _fill_workspace(count=3)
+    seen_payloads = []
+
+    def fake_chat(system, user):
+        payload = json.loads(user)
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            ids = [e["id"] for e in payload["code"]["entries"][:2]]
+            return json.dumps({"action": "read", "chunk_ids": ids,
+                               "why": "look at the bodies"})
+        return json.dumps({"action": "report", "report": {
+            "summary": "read it", "claims": [], "open_questions": []}})
+
+    monkeypatch.setattr(subagents, "chat_complete", fake_chat)
+    out = subagents._run_scout("what does f1 return", session_id=1, turn_idx=1)
+
+    # The map it was given is a digest, not the corpus.
+    assert "code" in seen_payloads[0]
+    assert _NEEDLE not in json.dumps(seen_payloads[0])
+    # ...and after one read, it actually holds source it can quote.
+    read = seen_payloads[1]["code_you_have_read"]
+    assert read and any(_NEEDLE in r["text"] for r in read)
+    # Which means the claim it makes is supportable: the read is evidence.
+    assert out["evidence"]

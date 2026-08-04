@@ -59,8 +59,10 @@ import codemap
 import config
 import memory
 import prompts
+import chunks
 import research
 import tools_web
+import turnrun
 import workspace
 from db import state_get, state_put, transaction
 from providers import chat_complete, chat_configured, parse_model_json
@@ -873,17 +875,39 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
     written anywhere by this function — the caller decides, after
     validation."""
     gathered, seen = [], []
-    # A scout sent at a codebase gets the map too. Read-only does not mean
-    # blind: the constraint is that it cannot CHANGE anything, not that it
-    # has to work without knowing where things are.
-    given_map = (workspace.codemap_for(session_id, max_files=40)
+    # A scout sent at a codebase gets the map AND a way to open it.
+    #
+    # It used to get `codemap_for` and nothing else, which is a list of names
+    # it could never read: its three actions were search, fetch-a-URL and
+    # report, and a local file is not a URL. Measured on three real scouts
+    # sent to investigate this project: 7 claims between them, `evidence: 0`
+    # and `grounded_claims: 0` on every one. They were not lazy — the support
+    # a claim about local code needs was structurally unavailable, so every
+    # claim they made was a guess about a filename.
+    #
+    # Read-only does not mean blind: the constraint is that a scout cannot
+    # CHANGE anything, and reading is not changing.
+    given_map = (chunks.digest(kind="code", query=task)
                  if session_id is not None
                  and workspace.has_files(session_id) else None)
+    read_chunks = []
+    # A scout runs IN PROCESS, so it has no child to register and no stdout
+    # protocol to narrate it. Without these it was the quieter of the two
+    # gaps: the turn simply paused for four model calls.
+    run = turnrun.current()
+    label = str(task or "")[:80]
+    if run is not None:
+        run.emit("subagent", state="started", kind="scout", task=label)
     for _round in range(SCOUT_MAX_ROUNDS):
+        if run is not None:
+            # A scout is several model calls long, so a halt that could only
+            # land between subagents would wait out the whole thing.
+            run.halted()
         payload = {
             "task": task,
             "context_from_the_parent": context[:4000],
-            **({"codemap": given_map} if given_map else {}),
+            **({"code": given_map} if given_map else {}),
+            "code_you_have_read": read_chunks,
             "pages_read_so_far": gathered,
             "search_results": seen,
             "rounds_left": SCOUT_MAX_ROUNDS - _round,
@@ -892,7 +916,26 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
             prompts.render(prompts.SCOUT_SYSTEM),
             json.dumps(payload, ensure_ascii=False))) or {}
         name = str(action.get("action") or "").strip()
-        if name == "search":
+        if run is not None:
+            run.emit("subagent", state=name or "(no action)", kind="scout",
+                     task=label, rounds_left=SCOUT_MAX_ROUNDS - _round,
+                     detail=str(action.get("query") or action.get("url")
+                                or "")[:120])
+        if name == "read":
+            ids = action.get("chunk_ids")
+            got = chunks.expand(ids=ids if isinstance(ids, list) else [])
+            for piece in got:
+                if piece.get("unknown") or not piece.get("text"):
+                    continue
+                read_chunks.append({"id": piece["id"],
+                                    "source": piece.get("source", ""),
+                                    "title": piece.get("title", ""),
+                                    "text": piece["text"][:4000]})
+            gathered.extend({"url": p["id"], "title": p.get("source", ""),
+                             "excerpt": p["text"][:600], "stance": "context"}
+                            for p in read_chunks[-len(got or []):]
+                            if p.get("text"))
+        elif name == "search":
             seen = tools_web.search(str(action.get("query") or task),
                                     max_results=5)
         elif name == "fetch":
@@ -908,9 +951,16 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
         elif name == "report":
             out = dict(action.get("report") or {})
             out.setdefault("evidence", gathered)
+            if run is not None:
+                run.emit("subagent", state="reported", kind="scout",
+                         task=label, evidence=len(out.get("evidence") or []),
+                         summary=str(out.get("summary") or "")[:160])
             return out
     # Budget spent without a report: return what was actually gathered rather
     # than nothing, and say plainly that it is incomplete.
+    if run is not None:
+        run.emit("subagent", state="ran out of rounds", kind="scout",
+                 task=label, evidence=len(gathered))
     return {"summary": "The scout ran out of rounds before reporting.",
             "evidence": gathered,
             "could_not_establish": [task]}
@@ -1132,6 +1182,24 @@ def _converse(proc, task_payload, *, session_id, turn_idx, assignment=None,
     A hard cap on queries, for the same reason every other loop here is
     bounded: a child that can ask forever is a child that never reports, and
     the parent is holding a user's turn open while it happens."""
+    # THE PARENT ALREADY SEES EVERYTHING THE CHILD DOES — every question,
+    # every sibling message, the report — and until now it told nobody. A
+    # subagent was a gap in the reasoning panel: the turn went quiet for up to
+    # DEEP_TIMEOUT with no way to tell work from a hang.
+    #
+    # `turnrun.current()` is thread-local and a subagent is spawned on the
+    # turn's own worker thread, so the live run is reachable here without
+    # threading a parameter through `spawn`, `_run_deep` and `_converse`.
+    # None for a blocking turn or a test, and then this is inert.
+    run = turnrun.current()
+    label = str(task_payload.get("task") or "")[:80]
+    if run is not None:
+        run.emit("subagent", state="started", kind="deep", task=label)
+        # Registering the child means HALT REACHES IT. Without this a halt
+        # during a subagent set the flag and then waited out the child's
+        # remaining timeout, which from the button's side is a halt that did
+        # nothing for two minutes.
+        run.register_process(proc)
     deadline = time.monotonic() + DEEP_TIMEOUT
     proc.stdin.write(json.dumps(task_payload) + "\n")
     proc.stdin.flush()
@@ -1156,8 +1224,20 @@ def _converse(proc, task_payload, *, session_id, turn_idx, assignment=None,
             # failure of the investigation
         kind = str(message.get("type") or "")
         if kind == "report":
-            return message.get("report") or {}
+            report = message.get("report") or {}
+            if run is not None:
+                run.unregister_process(proc)
+                run.emit("subagent", state="reported", kind="deep",
+                         task=label,
+                         claims=len(report.get("claims") or []),
+                         evidence=len(report.get("evidence") or []),
+                         summary=str(report.get("summary") or "")[:160])
+            return report
         if kind == "message" and cohort is not None:
+            if run is not None:
+                run.emit("subagent", state="messaged a sibling", kind="deep",
+                         task=label,
+                         detail=str(message.get("text") or "")[:120])
             # A child talking to its siblings. Routed, relevance-checked, and
             # non-blocking in both directions.
             reply = {"type": "routed",
@@ -1175,6 +1255,11 @@ def _converse(proc, task_payload, *, session_id, turn_idx, assignment=None,
             continue
         if kind == "query":
             answered += 1
+            if run is not None:
+                run.emit("subagent", state="asked a question", kind="deep",
+                         task=label,
+                         detail=str(message.get("question") or "")[:140],
+                         questions_left=max(0, MAX_CHILD_QUERIES - answered))
             if answered > MAX_CHILD_QUERIES:
                 reply = {"type": "answer", "answer": "",
                          "note": "You have used all your questions. Finish "

@@ -247,6 +247,44 @@ async function loadAgents() {
   }
   const badge = document.getElementById('agents-badge');
   badge.hidden = !(out.requests || []).length;
+  loadAgentArchives();
+}
+
+// What a deep subagent actually did, after the fact.
+//
+// The endpoint has existed since subagents were built and nothing ever
+// called it: the tarballs were on disk and unreachable from the interface,
+// which for the person trying to audit a run is the same as not existing.
+// Metadata only, deliberately — subagents.py argues that opening one should
+// be an act, not something a listing does for you.
+async function loadAgentArchives() {
+  const box = document.getElementById('agent-archives');
+  if (!box) return;
+  let out;
+  try {
+    out = await api('/api/subagents/archives');
+  } catch (e) { return; }
+  box.innerHTML = '';
+  const runs = out.archives || [];
+  if (!runs.length) {
+    const empty = el('<div class="muted"></div>');
+    empty.textContent = 'No deep runs archived yet. They appear here after a '
+      + 'deep subagent finishes, and the newest ' + out.keep_runs + ' are kept.';
+    box.appendChild(empty);
+    return;
+  }
+  for (const r of runs) {
+    const card = el('<div class="card"><div class="when"></div>' +
+                    '<div class="why"></div><div class="muted"></div></div>');
+    card.querySelector('.when').textContent =
+      (r.kind || 'deep') + ' — ' + new Date((r.archived || 0) * 1000)
+        .toLocaleString();
+    card.querySelector('.why').textContent = r.task || '(no task recorded)';
+    card.querySelector('.muted').textContent =
+      r.id + '  ·  ' + Math.round((r.bytes || 0) / 1024) + ' KB  ·  '
+      + out.root + '/' + r.id + '.tar.gz';
+    box.appendChild(card);
+  }
 }
 
 async function grantAgents(kind, count) {

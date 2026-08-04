@@ -117,6 +117,27 @@ function reasoningLine(ev) {
     return 'research round (' + ev.rounds_left + ' left) → ' + ev.action
       + (what ? '\n   ' + what : '');
   }
+  if (ev.stage === 'subagent') {
+    // A subagent used to be a hole in this panel: the turn went quiet for up
+    // to DEEP_TIMEOUT with no way to tell work from a hang.
+    let text = (ev.kind || 'subagent') + ' — ' + ev.state;
+    if (ev.task) text += '\n   task: ' + ev.task;
+    if (ev.detail) text += '\n   ' + ev.detail;
+    if (ev.questions_left !== undefined) {
+      text += '\n   (' + ev.questions_left + ' questions left)';
+    }
+    if (ev.rounds_left !== undefined) {
+      text += '\n   (' + ev.rounds_left + ' rounds left)';
+    }
+    if (ev.state === 'reported') {
+      const bits = [];
+      if (ev.claims !== undefined) bits.push(ev.claims + ' claims');
+      if (ev.evidence !== undefined) bits.push(ev.evidence + ' evidence');
+      if (bits.length) text += '\n   ' + bits.join(', ');
+      if (ev.summary) text += '\n   ' + ev.summary;
+    }
+    return text;
+  }
   if (ev.stage === 'commit') return 'committing — past the point of no halt';
   if (ev.stage === 'halted') return 'halted; nothing was committed';
   if (ev.stage === 'failed') return 'failed: ' + ev.error;
