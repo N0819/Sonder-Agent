@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonder Assistant</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Sonder Assistant</h1>
+    <nav>
+      <button data-panel="chat" class="active">Chat</button>
+      <button data-panel="memory">Memory</button>
+      <button data-panel="research">Research</button>
+      <button data-panel="beliefs">Beliefs</button>
+      <button data-panel="files">Files</button>
+      <button data-panel="agents">Subagents<span id="agents-badge"
+        class="badge" hidden>!</span></button>
+      <button data-panel="settings">Settings</button>
+    </nav>
+  </header>
+  <main>
+    <section id="panel-chat" class="panel active">
+      <div id="log"></div>
+      <form id="composer">
+        <textarea id="input" rows="2"
+          placeholder="Say something… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button type="submit" id="send">Send</button>
+        <!-- Shown only while a turn is in flight: a halt button that is
+             always visible is a halt button that is usually a no-op. -->
+        <button type="button" id="halt" style="display:none">Halt</button>
+      </form>
+    </section>
+    <section id="panel-memory" class="panel">
+      <form id="memsearch"><input id="memquery"
+        placeholder="Search memory… (empty = recent)"><button>Search</button></form>
+      <div id="memories"></div>
+      <h2>Set aside</h2>
+      <p class="muted">Memories the assistant judged no longer relevant to
+        what you are working on. They are out of its recall and still here —
+        put any of them back, or destroy them for good.</p>
+      <div id="retired"></div>
+      <div id="retired-status" class="muted"></div>
+    </section>
+    <section id="panel-research" class="panel">
+      <div id="hypotheses"></div>
+    </section>
+    <section id="panel-beliefs" class="panel">
+      <div id="beliefs"></div>
+    </section>
+
+    <section id="panel-files" class="panel">
+      <div id="dropzone">
+        <p><strong>Drop files here</strong> — or
+          <label class="linkish">choose them<input id="filepick" type="file"
+            multiple hidden></label>.</p>
+        <p class="muted">Archives get an <em>Extract</em> button. Everything
+          here is readable in the sandbox, so the assistant can run code
+          against it.</p>
+      </div>
+      <div id="filestatus" class="muted"></div>
+      <div id="files"></div>
+    </section>
+
+    <section id="panel-agents" class="panel">
+      <p class="muted">The assistant cannot spawn subagents unless you allow
+        it to, and it cannot raise its own allowance. It sees the numbers
+        below every turn, and may ask for more.</p>
+      <div id="agent-requests"></div>
+      <div id="agent-grants"></div>
+      <button id="agent-revoke" class="danger">Revoke all</button>
+    </section>
+
+    <section id="panel-settings" class="panel">
+      <h2>Chat provider</h2>
+      <div id="settings-form"></div>
+      <div id="settings-status" class="muted"></div>
+      <div class="row">
+        <button id="settings-save">Save</button>
+        <button id="settings-test">Test connection</button>
+        <button id="settings-rebuild">Rebuild embeddings</button>
+      </div>
+      <h2>Persona</h2>
+      <p class="muted">Every field is required. An empty one fails silently —
+        it reads as a complete sheet and behaves like a broken one.</p>
+      <div id="persona-form"></div>
+      <button id="persona-save">Save persona</button>
+    </section>
+  </main>
+</div>
+<!-- Browser globals, no bundler, load order matters — engine convention. -->
+<script src="/static/js/utils.js"></script>
+<script src="/static/js/chat.js"></script>
+<script src="/static/js/app.js"></script>
+<script src="/static/js/controls.js"></script>
+</body>
+</html>

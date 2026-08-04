@@ -1,0 +1,436 @@
+# Provider configuration, and the two ways it silently did nothing.
+#
+# Both defects here are the same shape as the persona-drive scar: a field that
+# is authored, saved, displayed — and read by nothing. An empty field fails
+# silently; a field nothing reads defeats even the check built to catch an
+# empty one.
+
+import json
+import os
+
+import pytest
+
+import config
+import memory
+import providers
+
+
+def test_the_embeddings_settings_are_actually_read(temp_db, monkeypatch):
+    """`_embed_config` read os.environ directly while the Settings tab
+    displayed and saved `embed_base`/`embed_model` that nothing consulted.
+    Configuring embeddings in the UI did nothing at all, and retrieval stayed
+    on the lexical fallback while the page said otherwise."""
+    monkeypatch.delenv("ASSISTANT_EMBED_BASE", raising=False)
+    monkeypatch.delenv("ASSISTANT_EMBED_MODEL", raising=False)
+    assert providers._embed_config() is None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    config.save_config({"embed_base": "https://openrouter.ai/api/v1",
+                        "embed_model": "perplexity/pplx-embed-v1-4b",
+                        "embed_key_env": "OPENROUTER_API_KEY"})
+    got = providers._embed_config()
+    assert got is not None
+    base, model, key = got
+    assert base == "https://openrouter.ai/api/v1"
+    assert model == "perplexity/pplx-embed-v1-4b"
+    assert key == "sk-test"
+
+
+def test_embeddings_are_configured_separately_from_chat(temp_db):
+    """Not a convenience — the Claude Code CLI has no embeddings endpoint, so
+    an assistant composing replies through it still needs somewhere to
+    vectorise or three of the four ranking lanes go dark."""
+    config.save_config({"chat_provider": config.PROVIDER_CLAUDE_CODE,
+                        "embed_base": "https://openrouter.ai/api/v1",
+                        "embed_model": "perplexity/pplx-embed-v1-4b"})
+    cfg = config.get_config()
+    assert cfg["chat_provider"] == config.PROVIDER_CLAUDE_CODE
+    assert providers._embed_config()[1] == "perplexity/pplx-embed-v1-4b"
+
+
+def test_a_preset_sets_a_key_name_and_never_a_key(temp_db):
+    """The whole storage design in one assertion: a settings row names the
+    variable a secret lives in and never carries the secret."""
+    cfg, _warnings = config.apply_preset("embed", "openrouter-pplx-4b")
+    assert cfg["embed_base"] == "https://openrouter.ai/api/v1"
+    assert cfg["embed_model"] == "perplexity/pplx-embed-v1-4b"
+    assert cfg["embed_key_env"] == "OPENROUTER_API_KEY"
+    # nothing anywhere in the stored row looks like a credential
+    import db
+    stored = db.setting_get("providers")
+    assert not any("sk-" in str(v) for v in stored.values())
+
+
+def test_the_status_view_never_carries_a_secret(temp_db, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-super-secret-value")
+    config.apply_preset("embed", "openrouter-pplx-4b")
+    status = config.redacted_status()
+    assert "sk-super-secret-value" not in str(status)
+    assert status["secrets"]["embed_key_env"]["present"] is True
+    assert status["secrets"]["embed_key_env"]["env"] == "OPENROUTER_API_KEY"
+
+
+def test_changing_the_embedding_model_warns_that_the_bank_is_stranded(
+        temp_db, monkeypatch):
+    """A vector can only be compared with one from the same model, so every
+    existing row scores 0.0 against a query embedded by a different one.
+    Retrieval keeps working, on keyword match alone, and looks fine — so the
+    warning has to arrive at the moment of the DECISION, not later from bad
+    answers."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    memory.add_memory("semantic", "told", 0.7, "something worth keeping",
+                      turn_idx=1, event_key="m:1")
+    assert not [w for w in config.config_warnings() if "stranded" in w]
+
+    config.apply_preset("embed", "openrouter-pplx-4b")
+    warnings = config.config_warnings()
+    assert any("cannot be compared" in w for w in warnings), warnings
+    assert any("perplexity/pplx-embed-v1-4b" in w for w in warnings)
+
+
+def test_the_identity_stamp_matches_what_will_be_written(temp_db):
+    """The warning above compares against this, so it has to be the same
+    string `embed_texts_meta` stamps on a new vector."""
+    assert config.embedding_identity() == "cheap:crc32:256"
+    config.apply_preset("embed", "openrouter-pplx-4b")
+    assert config.embedding_identity() == "api:perplexity/pplx-embed-v1-4b"
+    batch = providers.embed_texts_meta(["x"])
+    if not batch.fallback:                    # only when a key is present
+        assert batch.model_key == config.embedding_identity()
+
+
+# ---- The CLI provider's transport ----
+
+def test_a_large_payload_goes_on_stdin_not_argv(temp_db, monkeypatch):
+    """`[Errno 7] Argument list too long`. The payload was passed as a
+    trailing argv entry, and Linux caps a SINGLE entry at MAX_ARG_STRLEN
+    (128 KiB) independently of the 2 MiB total — so the respond stage died as
+    soon as a session had real material in it. Measured at the time: 102 KB of
+    codemap alone for a 115-file upload, before memory or beliefs were added.
+    The user saw "respond stage failed", which named nothing actionable."""
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            seen["input"] = input
+            return '{"is_error": false, "result": "ok"}', ""
+
+    def fake_popen(argv, **kw):
+        seen["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(providers.subprocess, "Popen", fake_popen)
+    payload = "x" * 200_000
+    providers._claude_code_complete(
+        {"claude_binary": "claude", "claude_timeout": 30.0}, "sys", payload)
+    assert seen["input"] == payload
+    assert not any(len(a) > providers.MAX_ARGV_ENTRY_BYTES
+                   for a in seen["argv"])
+
+
+def test_an_oversized_system_prompt_is_named_not_left_to_execve(temp_db,
+                                                                monkeypatch):
+    """The system prompt has no stdin channel (this CLI has no
+    --system-prompt-file), so it is the one argv entry that can still grow.
+    The kernel's answer for that is E2BIG on the whole exec, which says
+    neither which argument was too long nor what to do — the failure that
+    started this. Checked before spawning, where the cause is still known."""
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+    with pytest.raises(RuntimeError) as caught:
+        providers._claude_code_complete(
+            {"claude_binary": "claude", "claude_timeout": 30.0},
+            "s" * 200_000, "user")
+    assert "system prompt" in str(caught.value)
+    assert "HTTP provider" in str(caught.value)
+
+
+# ---- The two ways a correct provider still fails to connect ----
+
+def test_a_base_url_that_already_names_its_route_is_folded(temp_db):
+    """Copying the URL from a provider's docs gives you the full endpoint, and
+    the provider layer appends the route itself — so
+    `https://openrouter.ai/api/v1/embeddings` became `…/embeddings/embeddings`
+    and 404'd. The UI then reported "HTTP Error 404", naming neither the cause
+    nor the field. Folded on the way in, per the canonical_url rule."""
+    config.save_config({"embed_base": "https://openrouter.ai/api/v1/embeddings",
+                        "chat_base": "https://api.openai.com/v1/chat/completions"})
+    got = config.get_config()
+    assert got["embed_base"] == "https://openrouter.ai/api/v1"
+    assert got["chat_base"] == "https://api.openai.com/v1"
+    # Idempotent: an already-correct base survives a re-save untouched.
+    config.save_config({"embed_base": got["embed_base"]})
+    assert config.get_config()["embed_base"] == "https://openrouter.ai/api/v1"
+
+
+def test_a_stored_key_is_what_actually_gets_sent(temp_db, monkeypatch):
+    """The point of storing a key at all: type it, save, and the next request
+    is authenticated — no export, no restart. The restart is what made the
+    environment-only path fail invisibly, because a running process cannot see
+    an export made after it launched."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    config.save_config({"embed_base": "https://openrouter.ai/api/v1",
+                        "embed_model": "perplexity/pplx-embed-v1-4b",
+                        "embed_key_env": "OPENROUTER_API_KEY",
+                        "embed_key": "sk-or-v1-abc123def"})
+    assert config.secret_for("embed_key_env") == "sk-or-v1-abc123def"
+    assert config.secret_source("embed_key_env") == "stored"
+    assert providers._embed_config()[2] == "sk-or-v1-abc123def"
+    # And the 401 warning must stop firing, or it teaches users to ignore it.
+    assert not any("401" in w for w in config.config_warnings())
+
+
+def test_a_stored_key_beats_a_stale_export(temp_db, monkeypatch):
+    """Precedence is not arbitrary. The other order lets an export made months
+    ago silently shadow the key just typed into Settings, and the symptom is a
+    401 against configuration that looks correct — the exact failure the field
+    was added to end."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-stale-from-the-shell")
+    config.save_config({"embed_key_env": "OPENROUTER_API_KEY"})
+    assert config.secret_for("embed_key_env") == "sk-stale-from-the-shell"
+    config.save_config({"embed_key": "sk-typed-just-now"})
+    assert config.secret_for("embed_key_env") == "sk-typed-just-now"
+
+
+def test_a_stored_key_never_reaches_the_browser(temp_db):
+    """`get_config` now returns credentials, so `redacted_status` is the only
+    thing between them and the page. It strips by KEY_VALUE_FIELDS rather than
+    listing what to send, so a credential field added later is redacted by
+    default instead of shipped by omission."""
+    config.save_config({"embed_key": "sk-or-v1-secret", "chat_key": "sk-chat"})
+    status = config.redacted_status()
+    assert "sk-or-v1-secret" not in json.dumps(status)
+    assert "sk-chat" not in json.dumps(status)
+    assert status["config"]["embed_key"] == ""
+    # Presence still has to be reportable, or the page cannot tell "no key"
+    # from "a key you are not allowed to see".
+    assert status["secrets"]["embed_key_env"]["present"] is True
+    assert status["secrets"]["embed_key_env"]["source"] == "stored"
+
+
+def test_a_key_pasted_into_the_name_field_is_routed_not_refused(temp_db):
+    """Refusing was right only while there was nowhere to put it. A key typed
+    into the variable-name box is the obvious user action, so it is folded
+    into the right field on the way in — the `_fold_base_url` rule — rather
+    than rejected with an explanation of a distinction the user did not want
+    to learn."""
+    config.save_config({"embed_key_env": "OPENROUTER_API_KEY"})
+    _cfg, warnings = config.save_config({"embed_key_env": "sk-or-v1-pasted"})
+    assert config.secret_for("embed_key_env") == "sk-or-v1-pasted"
+    # The name field keeps its name — the paste must not destroy it.
+    assert config.get_config()["embed_key_env"] == "OPENROUTER_API_KEY"
+    assert any("looks like a key" in w for w in warnings)
+
+
+def test_a_blank_key_field_keeps_the_stored_key(temp_db):
+    """The page cannot re-display a stored key, so the input it draws is
+    always blank — and a blank submit that cleared the key would delete the
+    credential every time any unrelated setting was saved. Clearing is
+    explicit; blank means unchanged."""
+    config.save_config({"embed_key": "sk-or-v1-keepme"})
+    config.save_config({"embed_key": "", "embed_model": "some/other-model"})
+    assert config.secret_for("embed_key_env") == "sk-or-v1-keepme"
+    config.save_config({"embed_key": config.CLEAR_SECRET})
+    assert config.secret_for("embed_key_env") == ""
+    from db import setting_get
+    assert "keepme" not in json.dumps(setting_get("providers") or {})
+
+
+def test_configuring_one_provider_does_not_wipe_the_other(temp_db):
+    """`save_config` wrote its cleaned fields as the WHOLE settings row, so a
+    partial save reset every field it did not mention — and `apply_preset` is
+    exactly that: choosing an embeddings preset sends three embed_* fields and
+    wiped chat_base, chat_model and the claude_* block back to environment
+    defaults. Configuring one provider destroyed the other while the page
+    reported success."""
+    config.save_config({"chat_base": "https://api.example.com/v1",
+                        "chat_model": "my-chat-model"})
+    config.apply_preset("embed", "openrouter-pplx-4b")
+    got = config.get_config()
+    assert got["chat_model"] == "my-chat-model"
+    assert got["chat_base"] == "https://api.example.com/v1"
+    assert got["embed_model"] == "perplexity/pplx-embed-v1-4b"
+
+
+def test_a_save_that_changed_your_input_says_so_on_the_page(temp_db):
+    """`settings_put` threw `save_config`'s warnings away and returned a fresh
+    status, so a save that quietly rerouted a field redrew looking untouched —
+    which is what "I pressed save and nothing happened" actually was."""
+    from fastapi.testclient import TestClient
+    import app as app_module
+    client = TestClient(app_module.app)
+    out = client.put("/api/settings",
+                     json={"settings": {"chat_key_env": "sk-live-nope"}}).json()
+    assert any("looks like a key" in w for w in out["warnings"])
+    # ...and the response that carries the warning still carries no secret.
+    assert "sk-live-nope" not in json.dumps(out["config"])
+
+
+# ---- Rebuilding, so a provider change is not a one-way door ----
+
+def test_a_rebuild_without_a_provider_refuses_rather_than_destroying(temp_db):
+    """The failure mode to avoid is overwriting good vectors with
+    hashing-trick ones, which turns a stalled migration into a corrupted
+    bank."""
+    memory.add_memory("semantic", "told", 0.7, "a memory", turn_idx=1,
+                      event_key="m:1")
+    before = memory.visible_memory_rows(before_turn_idx=None,
+                                        include_archived=True)[0]["embedding"]
+    out = memory.rebuild_embeddings()
+    assert out["ok"] is False and "no embeddings provider" in out["error"]
+    after = memory.visible_memory_rows(before_turn_idx=None,
+                                       include_archived=True)[0]["embedding"]
+    assert before == after
+
+
+def test_a_rebuild_re_embeds_stranded_rows(temp_db, monkeypatch):
+    """DESIGN.md listed this unbuilt while a provider change was
+    hypothetical. It stops being hypothetical the moment somebody switches
+    providers: without it the settings page offers a choice between your
+    existing bank and better retrieval."""
+    import numpy as np
+    memory.add_memory("semantic", "told", 0.7, "a memory to migrate",
+                      turn_idx=1, event_key="m:1")
+    import db
+    db.qi("UPDATE memories SET embedding_model='api:old-model'")
+    assert config.config_warnings()
+
+    # A deterministic stand-in for a real provider: distinct model stamp,
+    # different dimensionality, no network.
+    def fake(texts):
+        return providers.EmbeddingBatch(
+            vectors=[np.ones(8, dtype=np.float32) / np.sqrt(8)
+                     for _ in texts],
+            model_key="api:perplexity/pplx-embed-v1-4b", dimensions=8)
+
+    monkeypatch.setattr(memory, "embed_texts_meta", fake)
+    out = memory.rebuild_embeddings()
+    assert out["ok"] and out["rebuilt"] == 1 and out["remaining"] == 0
+    row = db.q("SELECT embedding_model, embedding_dim FROM memories",
+               one=True)
+    assert row["embedding_model"] == "api:perplexity/pplx-embed-v1-4b"
+    assert row["embedding_dim"] == 8
+
+
+def test_a_completed_rebuild_is_a_no_op(temp_db, monkeypatch):
+    """Re-runnable by construction: it selects by "stamp differs from
+    current", so an interrupted run is continued by the next one and a
+    finished run does nothing."""
+    import numpy as np
+    memory.add_memory("semantic", "told", 0.7, "a memory", turn_idx=1,
+                      event_key="m:1")
+
+    def fake(texts):
+        return providers.EmbeddingBatch(
+            vectors=[np.ones(8, dtype=np.float32) / np.sqrt(8)
+                     for _ in texts],
+            model_key="api:e", dimensions=8)
+
+    monkeypatch.setattr(memory, "embed_texts_meta", fake)
+    assert memory.rebuild_embeddings()["rebuilt"] == 1
+    assert memory.rebuild_embeddings()["rebuilt"] == 0
+
+
+def test_a_rebuild_migrates_summary_windows_too(temp_db, monkeypatch):
+    """The rebuild covered `memories` and not `memory_summaries`, which also
+    stores a vector. A cross-model window is SKIPPED by
+    search_memory_summaries rather than scored, so every consolidated window
+    left retrieval permanently on a provider switch — while the rebuild
+    reported the bank fully comparable, which is the exact silent success this
+    whole mechanism exists to prevent."""
+    import numpy as np
+    import db
+
+    def fake(texts):
+        return providers.EmbeddingBatch(
+            vectors=[np.ones(8, dtype=np.float32) / np.sqrt(8)
+                     for _ in texts],
+            model_key="api:new", dimensions=8)
+
+    memory.save_memory_summary("the deploy pipeline moved to buildkite",
+                               end_turn_idx=4, key_phrases=["buildkite"])
+    db.qi("UPDATE memory_summaries SET embedding_model='api:old'")
+    assert any("summary windows" in w for w in config.config_warnings())
+
+    monkeypatch.setattr(memory, "embed_texts_meta", fake)
+    assert memory.search_memory_summaries("buildkite", exclude_latest=False,
+                                          embedded=fake(["q"])) == []
+    out = memory.rebuild_embeddings()
+    assert out["ok"] and out["summaries_rebuilt"] == 1 and out["remaining"] == 0
+    assert memory.search_memory_summaries("buildkite", exclude_latest=False,
+                                          embedded=fake(["q"]))
+
+
+def test_a_blank_summary_window_never_becomes_perpetual_work(temp_db,
+                                                             monkeypatch):
+    """A window with no prose is unretrievable by construction and cannot be
+    embedded from an empty string. Counted as outstanding but never processed,
+    it would make "run again to continue" an instruction that never
+    terminates."""
+    import numpy as np
+    import db
+    memory.save_memory_summary("", end_turn_idx=2)
+    db.qi("UPDATE memory_summaries SET embedding_model='api:old'")
+
+    monkeypatch.setattr(memory, "embed_texts_meta", lambda texts:
+                        providers.EmbeddingBatch(
+                            vectors=[np.ones(8, dtype=np.float32) / np.sqrt(8)
+                                     for _ in texts],
+                            model_key="api:new", dimensions=8))
+    out = memory.rebuild_embeddings()
+    assert out["ok"] and out["remaining"] == 0 and out["summaries_rebuilt"] == 0
+
+
+def test_a_rebuilt_document_is_the_document_that_was_stored(temp_db,
+                                                            monkeypatch):
+    """The rebuild rebuilt each document from content/gist/phrases/entities
+    only, so `_memory_document` fell back to its defaults — `kind: episodic`,
+    `source: witnessed`, an empty turn and url. A rebuilt vector therefore
+    encoded text the row never had, and the SELECT was already fetching the
+    fields it then discarded."""
+    import numpy as np
+    import db
+    memory.add_memory("semantic", "told", 0.7, "the invoice was paid",
+                      turn_idx=9, source_url="https://example.com/a",
+                      event_key="m:1")
+    db.qi("UPDATE memories SET embedding_model='api:old'")
+    seen = []
+
+    def fake(texts):
+        seen.extend(texts)
+        return providers.EmbeddingBatch(
+            vectors=[np.ones(8, dtype=np.float32) / np.sqrt(8)
+                     for _ in texts],
+            model_key="api:new", dimensions=8)
+
+    monkeypatch.setattr(memory, "embed_texts_meta", fake)
+    memory.rebuild_embeddings()
+    document = next(t for t in seen if t.startswith("kind:"))
+    assert "kind: semantic" in document and "source: told" in document
+    assert "turn: 9" in document
+    assert "url: https://example.com/a" in document
+
+
+def test_rebuilt_rows_are_retrievable_again(temp_db, monkeypatch):
+    """The point of the exercise: a stranded row is reachable by keyword only,
+    and after a rebuild it is back in the vector lanes."""
+    import numpy as np
+    memory.add_memory("semantic", "told", 0.7,
+                      "the deployment pipeline uses buildkite", turn_idx=1,
+                      event_key="m:1")
+    import db
+    db.qi("UPDATE memories SET embedding_model='api:stranded'")
+    _payload, internal = memory.build_memory_context(5, "deployment pipeline")
+    assert internal["retrieval_health"]["vector_incomparable_rows"] == 1
+
+    def fake(texts):
+        return providers.EmbeddingBatch(
+            vectors=[np.ones(256, dtype=np.float32) / 16.0 for _ in texts],
+            model_key="api:e", dimensions=256)
+
+    monkeypatch.setattr(memory, "embed_texts_meta", fake)
+    memory.rebuild_embeddings()
+    _payload, internal = memory.build_memory_context(5, "deployment pipeline")
+    assert internal["retrieval_health"]["vector_incomparable_rows"] == 0

@@ -1,0 +1,99 @@
+/* Minimal, theme-neutral. One file on purpose — the UI is a window onto the
+   engine's state, not a product surface. */
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, sans-serif;
+       background: #14161a; color: #d8dce2; }
+#app { max-width: 900px; margin: 0 auto; padding: 0 1rem;
+       display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; align-items: baseline; gap: 1.5rem;
+         padding: .75rem 0; border-bottom: 1px solid #2a2e35; }
+h1 { font-size: 1.05rem; margin: 0; color: #9ecbff; }
+nav button { background: none; border: none; color: #8a93a0;
+             cursor: pointer; font: inherit; padding: .2rem .5rem; }
+nav button.active { color: #d8dce2; border-bottom: 2px solid #9ecbff; }
+main { flex: 1; overflow: hidden; display: flex; }
+.panel { display: none; flex: 1; flex-direction: column;
+         overflow-y: auto; padding: 1rem 0; }
+.panel.active { display: flex; }
+#log { flex: 1; overflow-y: auto; display: flex;
+       flex-direction: column; gap: .75rem; }
+.msg { max-width: 85%; padding: .5rem .8rem; border-radius: .6rem;
+       white-space: pre-wrap; overflow-wrap: break-word; }
+.msg.user { align-self: flex-end; background: #24405e; }
+.msg.assistant { align-self: flex-start; background: #22262d; }
+.msg.meta { align-self: center; background: none; color: #77808c;
+            font-size: .8rem; }
+.msg .warnings { margin-top: .4rem; font-size: .78rem; color: #c9a86a; }
+.msg code { background: #1b1f25; border: 1px solid #2a2e35; border-radius: .25rem;
+            padding: .05rem .3rem; font-size: .85em; }
+.msg strong { font-weight: 650; color: #eef1f5; }
+.msg em { font-style: italic; }
+.msg .retry-bar { margin-top: .5rem; display: flex; gap: .5rem;
+                  align-items: center; flex-wrap: wrap; }
+.msg .retry-bar button {
+  background: #24405e; color: #d8dce2; border: none; border-radius: .4rem;
+  padding: .3rem .7rem; cursor: pointer; font-size: .8rem; }
+.msg .retry-bar button:disabled { opacity: .5; cursor: default; }
+.msg .retry-bar .muted { font-size: .72rem; color: #77808c; }
+.reasoning { margin-top: .45rem; text-align: left; }
+.reasoning-toggle { background: none; border: 1px solid #2a2e35;
+  color: #8b95a3; border-radius: .35rem; padding: .15rem .5rem;
+  font-size: .72rem; cursor: pointer; }
+.reasoning-body { margin-top: .4rem; border-left: 2px solid #2a2e35;
+  padding-left: .6rem; max-height: 22rem; overflow-y: auto; }
+.reasoning-step { font-size: .74rem; color: #8b95a3; white-space: pre-wrap;
+  padding: .12rem 0; font-family: ui-monospace, SFMono-Regular, monospace; }
+#halt { background: #5e2430; color: #e8d8dc; border: none;
+  border-radius: .4rem; padding: .4rem .9rem; cursor: pointer; }
+#halt:disabled { opacity: .6; cursor: default; }
+#composer { display: flex; gap: .5rem; padding-top: .75rem; }
+#input { flex: 1; resize: none; background: #1b1f25; color: inherit;
+         border: 1px solid #2a2e35; border-radius: .4rem; padding: .5rem; }
+button[type=submit], #memsearch button {
+  background: #24405e; color: #d8dce2; border: none;
+  border-radius: .4rem; padding: .4rem .9rem; cursor: pointer; }
+button:disabled { opacity: .5; }
+.card { background: #1b1f25; border: 1px solid #2a2e35;
+        border-radius: .5rem; padding: .6rem .8rem; margin-bottom: .6rem; }
+.card .tag { display: inline-block; font-size: .72rem; padding: 0 .4rem;
+             border-radius: .3rem; background: #2a2e35; color: #9aa4b1;
+             margin-right: .4rem; }
+.card .tag.disputed { background: #5e2430; color: #f0c0c8; }
+.card .tag.supports { background: #24513a; color: #b9e8c9; }
+.card .tag.contradicts { background: #5e2430; color: #f0c0c8; }
+.card .when { color: #77808c; font-size: .78rem; }
+.card .reading { color: #c9a86a; font-size: .85rem; margin-top: .3rem; }
+#memsearch { display: flex; gap: .5rem; margin-bottom: .8rem; }
+#memquery { flex: 1; background: #1b1f25; color: inherit;
+            border: 1px solid #2a2e35; border-radius: .4rem;
+            padding: .4rem .6rem; }
+a { color: #9ecbff; }
+
+/* Panels that change something: files, subagent grants, settings. */
+#dropzone {
+  border: 2px dashed #445; border-radius: 8px; padding: 1.5rem;
+  text-align: center; margin-bottom: 1rem; transition: background .15s;
+}
+#dropzone.dragging { background: #1d2433; border-color: #7aa2f7; }
+.linkish { color: #7aa2f7; cursor: pointer; text-decoration: underline; }
+.field { display: block; margin: .6rem 0; }
+.field span { display: block; font-size: .82rem; color: #9aa5b1;
+              margin-bottom: .2rem; }
+.field input, .field select, .field textarea {
+  width: 100%; box-sizing: border-box;
+}
+.field em { font-size: .78rem; }
+.row { display: flex; gap: .5rem; align-items: center; margin-top: .5rem;
+       flex-wrap: wrap; }
+.path { font-family: ui-monospace, monospace; word-break: break-all; }
+.warn { color: #e0af68; font-size: .85rem; margin: .3rem 0; }
+.card.request { border-left: 3px solid #e0af68; }
+button.danger { background: #3b2530; color: #f7768e; }
+.badge {
+  display: inline-block; margin-left: .35rem; padding: 0 .4rem;
+  border-radius: 999px; background: #e0af68; color: #1a1b26;
+  font-size: .7rem; font-weight: 700;
+}
+.card.retired { border-left: 3px solid #565f89; opacity: .85; }
+.card.retired .items { margin: .4rem 0 0 1rem; font-size: .85rem;
+                       color: #9aa5b1; }

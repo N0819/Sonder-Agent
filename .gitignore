@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Any SQLite file, not just the default name. `ASSISTANT_DB` can point
+# anywhere, so naming one file would leave every other database a commit
+# away — and this one now stores provider credentials (config.KEY_VALUE_FIELDS)
+# as well as the memory bank.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+# Uploaded files and extracted archives — the user's material, not the code's.
+workspaces/
+# Finished deep-subagent runs, kept for forensics. Bounded by retention in
+# subagents.py, but never a thing to commit.
+subagent-archive/
+.venv/
+venv/

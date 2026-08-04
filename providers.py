@@ -1,0 +1,430 @@
+# providers.py — LLM chat and embeddings, with deterministic degradation.
+#
+# A cut-down port of the engine's providers.py. Two roles: `chat` and
+# `embeddings`, each an OpenAI-compatible endpoint configured by environment
+# (or left unconfigured). Two properties carried over on purpose:
+#
+# 1. **Embedding failure degrades to cheap_embed, loudly.** cheap_embed is a
+#    signed hashing trick over character 3/4-grams — a fuzzy LEXICAL signature,
+#    not a semantic vector. The engine measured it at 0% recall on
+#    vocabulary-disjoint paraphrases (median rank 228/441, i.e. random), so the
+#    fallback keeps retrieval alive on shared vocabulary and nothing else.
+#    Every EmbeddingBatch carries model_key + dimensions because a vector can
+#    only be compared with one from the same model: a mismatched row scores
+#    0.0 forever, silently, and the model stamp is what lets retrieval count
+#    and announce the stranding instead of quietly splitting the bank.
+#
+# 2. **Tests never touch the network.** set_chat_stub installs a deterministic
+#    responder; embeddings fall back to cheap_embed when no provider is
+#    configured, which is also what makes the whole test tier runnable
+#    offline. This mirrors the engine's rule that the deterministic floor
+#    must not depend on a model cooperating — or being reachable.
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import zlib
+from dataclasses import dataclass, field
+
+import turnrun
+
+import numpy as np
+
+import config
+
+REQUEST_TIMEOUT = float(os.environ.get("ASSISTANT_HTTP_TIMEOUT", "60"))
+
+
+@dataclass
+class EmbeddingBatch:
+    vectors: list = field(default_factory=list)
+    model_key: str = "cheap:crc32:256"
+    dimensions: int = 256
+    fallback: bool = False
+    error: str = ""
+
+
+def cheap_embed(text, dim=256):
+    v = np.zeros(dim, dtype=np.float32)
+    t = " " + (text or "").lower() + " "
+    for n in (3, 4):
+        for i in range(max(len(t) - n, 0)):
+            h = zlib.crc32(t[i:i + n].encode("utf-8", "ignore"))
+            v[h % dim] += 1.0 if (h >> 16) & 1 else -1.0
+    nrm = np.linalg.norm(v)
+    return v / nrm if nrm > 0 else v
+
+
+def _embed_config():
+    """Where embeddings come from — read from SETTINGS, not from the
+    environment behind the settings' back.
+
+    This function used to read `os.environ` directly while the Settings tab
+    happily displayed and saved `embed_base` / `embed_model` fields that
+    nothing consulted. Configuring embeddings in the UI did nothing at all,
+    silently, and retrieval stayed on the lexical fallback while the page
+    said otherwise. That is the persona-drive scar exactly — a field nothing
+    reads defeats even the check built to catch an empty one — reintroduced
+    in the same commit that fixed the original.
+
+    The embeddings provider is deliberately INDEPENDENT of the chat provider:
+    the Claude Code CLI has no embeddings endpoint at all, so an assistant
+    talking through it still needs somewhere else to vectorise. They are two
+    roles, not one setting."""
+    cfg = config.get_config()
+    base = str(cfg.get("embed_base") or "").rstrip("/")
+    model = str(cfg.get("embed_model") or "")
+    key = config.secret_for("embed_key_env") or os.environ.get(
+        "ASSISTANT_API_KEY", "")
+    return (base, model, key) if base and model else None
+
+
+def embed_texts_meta(texts) -> EmbeddingBatch:
+    texts = [str(t or "") for t in texts]
+    if not texts:
+        return EmbeddingBatch(vectors=[])
+    cfg = _embed_config()
+    if cfg:
+        base, model, key = cfg
+        try:
+            req = urllib.request.Request(
+                base + "/embeddings",
+                data=json.dumps({"model": model, "input": texts}).encode(),
+                headers={"Content-Type": "application/json",
+                         **({"Authorization": f"Bearer {key}"} if key else {})})
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+                data = json.loads(r.read().decode())
+            items = sorted(data.get("data") or [],
+                           key=lambda item: item.get("index", 0))
+            if len(items) != len(texts):
+                raise RuntimeError("embedding provider returned wrong count")
+            vectors, dim = [], None
+            for item in items:
+                vec = np.asarray(item["embedding"], dtype=np.float32)
+                dim = dim or len(vec)
+                nrm = np.linalg.norm(vec)
+                # L2-normalise HERE so ranking can use a plain dot product —
+                # the engine measured 4.4x from dropping the per-comparison
+                # norms, and it only works if every producer normalises.
+                vectors.append(vec / nrm if nrm > 0 else vec)
+            return EmbeddingBatch(vectors=vectors,
+                                  model_key=f"api:{model}",
+                                  dimensions=dim or 0)
+        except Exception as exc:  # degrade, and say why — verbatim, because
+            # "no embeddings provider" is the wrong sentence when one IS
+            # configured and is simply not an embeddings model.
+            detail = str(exc)[:300]
+            # A bare "HTTP Error 401: Unauthorized" names neither the field
+            # nor the fix, and the two causes need opposite actions: no key at
+            # all is a settings problem, a rejected key is a credential
+            # problem. Distinguishing them here is the difference between a
+            # message that ends the investigation and one that starts it.
+            if "401" in detail or "403" in detail:
+                detail += (
+                    " — the embeddings key was rejected. It is currently "
+                    f"coming from {config.secret_source('embed_key_env')
+                                   or 'nowhere'}"
+                    + ("; paste a key into the embeddings key field in "
+                       "Settings" if not key else
+                       "; check that key is correct and not revoked"))
+            return EmbeddingBatch(
+                vectors=[cheap_embed(t) for t in texts],
+                fallback=True, error=detail[:400])
+    return EmbeddingBatch(vectors=[cheap_embed(t) for t in texts])
+
+
+# ---- Chat ----
+
+_chat_stub = None
+
+
+def set_chat_stub(fn):
+    """Install a deterministic responder for tests: fn(system, user) -> str.
+    Pass None to remove. The pipeline is written so that everything OUTSIDE
+    the model call is deterministic; the stub is how tests prove that claim
+    rather than assuming it."""
+    global _chat_stub
+    _chat_stub = fn
+
+
+def chat_configured():
+    if _chat_stub is not None:
+        return True
+    cfg = config.get_config()
+    if cfg["chat_provider"] == config.PROVIDER_CLAUDE_CODE:
+        return bool(shutil.which(cfg["claude_binary"] or "claude"))
+    return bool(cfg["chat_base"] and cfg["chat_model"])
+
+
+def chat_complete(system, user, *, temperature=0.4, max_tokens=2000):
+    """One chat completion. Raises RuntimeError with a legible reason when no
+    provider is configured — the caller decides how to surface that; nothing
+    here fabricates a reply."""
+    if _chat_stub is not None:
+        return _chat_stub(system, user)
+    cfg = config.get_config()
+    if cfg["chat_provider"] == config.PROVIDER_CLAUDE_CODE:
+        return _claude_code_complete(cfg, system, user)
+    base = str(cfg["chat_base"] or "").rstrip("/")
+    model = cfg["chat_model"]
+    key = config.secret_for("chat_key_env") or os.environ.get(
+        "ASSISTANT_API_KEY", "")
+    if not base or not model:
+        raise RuntimeError(
+            "no chat model configured: set a base URL and model in Settings, "
+            "or switch the provider to the Claude Code CLI")
+    req = urllib.request.Request(
+        base + "/chat/completions",
+        data=json.dumps({
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }).encode(),
+        headers={"Content-Type": "application/json",
+                 **({"Authorization": f"Bearer {key}"} if key else {})})
+    data = _post_with_retry(req)
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("chat provider returned no choices: %s"
+                           % str(data)[:200])
+    # TRUNCATION IS NOT A PARSE FAILURE, AND SAYING SO SENDS THE OPERATOR TO
+    # THE WRONG SUBSYSTEM. `finish_reason` was never read: a reply that hit
+    # max_tokens came back as invalid JSON, the pipeline dropped the WHOLE
+    # turn's side channels (reply, remember marks, belief updates, research
+    # request) behind "respond stage returned unparseable output", and the
+    # user was shown "I have no language model configured" — which is false.
+    # Fix the earliest stage where the data first becomes wrong: name the
+    # real cause here, where the cause is still visible.
+    if str(choices[0].get("finish_reason") or "") == "length":
+        raise RuntimeError(
+            f"model output was truncated at max_tokens={max_tokens}; the "
+            "reply and every side channel in it were lost. Raise max_tokens "
+            "or shorten the payload.")
+    return str((choices[0].get("message") or {}).get("content") or "")
+
+
+# One blip must not cost a whole turn. Bounded, so a provider that is down
+# stays down quickly rather than holding the request open for minutes.
+_RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_RETRY_ATTEMPTS = 3
+
+
+def _post_with_retry(req, attempts=_RETRY_ATTEMPTS):
+    """POST with bounded exponential backoff on transient failures.
+
+    A single 429 or 502 used to raise straight out of `urlopen`, degrading
+    the entire turn, and the provider's own error body — the part that says
+    WHICH limit was hit — was never read, so the operator got only
+    "HTTP Error 429: Too Many Requests"."""
+    delay = 1.0
+    last = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "replace")[:300]
+            except Exception:
+                pass
+            last = RuntimeError(f"chat provider HTTP {exc.code}: {body}")
+            if exc.code not in _RETRY_STATUSES or attempt == attempts - 1:
+                raise last from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers \
+                else None
+            try:
+                wait = float(retry_after) if retry_after else delay
+            except (TypeError, ValueError):
+                wait = delay
+            time.sleep(min(wait, 30.0))
+            delay *= 2
+        except urllib.error.URLError as exc:
+            last = RuntimeError(f"chat provider unreachable: {exc.reason}")
+            if attempt == attempts - 1:
+                raise last from exc
+            time.sleep(delay)
+            delay *= 2
+    raise last or RuntimeError("chat provider failed")
+
+
+# ---- The Claude Code CLI as a chat provider ----
+#
+# Same contract as the HTTP path: (system, user) -> text. Everything around it
+# — memory, grounding, the commit discipline — is unchanged, because the
+# provider seam is the only thing that knows how a reply got composed.
+#
+# Three things are deliberate here:
+#
+# `cwd` is an EMPTY throwaway directory. Without `--bare` the CLI discovers
+# CLAUDE.md by walking up from its working directory, so running it inside
+# this repository would silently prepend this project's engineering
+# instructions to the assistant's own system prompt — the assistant would
+# start answering its user as though it were maintaining Sonder. An empty cwd
+# has nothing to discover.
+#
+# `--bare` is NOT used, even though it would skip that discovery directly,
+# because it also forces auth to ANTHROPIC_API_KEY only and never reads the
+# OAuth login. Measured: `--bare` on a logged-in machine returns
+# "Not logged in · Please run /login". Neutralising the cwd achieves the same
+# isolation without breaking the common case.
+#
+# `--tools ""` because this role is COMPOSITION, not agency. The assistant's
+# tools are its own — memory, research, the sandbox, the coding suite — and
+# they are governed by the epistemics in this repository. A provider that
+# quietly ran a second, ungoverned tool loop would put actions outside every
+# guard here.
+#
+# It must be `--tools ""` and NOT `--allowed-tools ""`, which was the first
+# attempt and is a filter rather than a switch: the model still had tools, so
+# a payload mentioning a file made it reach for Read, that consumed a turn,
+# and the run died at --max-turns with `stop_reason: "tool_use"`,
+# `is_error: true` and an EMPTY result string. Measured, not guessed — the
+# deep subagent failed all three of its turns this way while reporting the
+# failure honestly enough that the cause was still invisible. `--tools ""`
+# removes the tools rather than hiding them, so there is nothing to reach for.
+#
+# THE PAYLOAD GOES ON STDIN, NOT IN ARGV. Passing it as a trailing argument
+# worked until a session had real material in it and then failed as
+# `OSError: [Errno 7] Argument list too long` — which surfaced to the user as
+# "respond stage failed" and named nothing anybody could act on. Linux caps a
+# SINGLE argv entry at MAX_ARG_STRLEN (128 KiB), independent of the 2 MiB
+# total, and the turn payload crosses it as soon as a codemap is in it:
+# measured at 102 KB of codemap alone for a 115-file upload, before memory,
+# beliefs or hypotheses were added.
+#
+# `claude -p` reads the prompt from stdin when no prompt argument is given, so
+# the fix is a channel change rather than a size limit — verified against the
+# installed CLI. The system prompt has no such channel in this version (there
+# is no --system-prompt-file), so it stays in argv and is checked below
+# instead: a limit that is going to be hit deserves its own sentence.
+class _Completed:
+    """What `subprocess.run` would have returned. Kept so the parsing below
+    is unchanged by the switch to Popen."""
+
+    def __init__(self, stdout, stderr, returncode):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+MAX_ARGV_ENTRY_BYTES = 131072       # Linux MAX_ARG_STRLEN, 32 pages
+_SYSTEM_PROMPT_BUDGET = MAX_ARGV_ENTRY_BYTES - 8192   # headroom for the rest
+
+
+def _claude_code_complete(cfg, system, user):
+    binary = str(cfg.get("claude_binary") or "claude").strip() or "claude"
+    resolved = shutil.which(binary)
+    if not resolved:
+        raise RuntimeError(
+            f"the Claude Code CLI ({binary!r}) is not on PATH; install it or "
+            "point Settings at the right binary")
+    argv = [resolved, "-p", "--output-format", "json",
+            # 2, not 1: headroom so a single stray step cannot end the run
+            # outright. With --tools "" there is nothing to step toward, but
+            # a ceiling of exactly one leaves no margin for the CLI's own
+            # internal turns.
+            "--max-turns", "2", "--tools", "",
+            "--system-prompt", system]
+    model = str(cfg.get("claude_model") or "").strip()
+    if model:
+        argv += ["--model", model]
+    try:
+        timeout = float(cfg.get("claude_timeout") or 180.0)
+    except (TypeError, ValueError):
+        timeout = 180.0
+    # The one argv entry that can still grow. Checked before spawning, because
+    # the kernel's own answer for this is E2BIG on the whole exec, which names
+    # neither which argument was too long nor what to do about it.
+    system_bytes = len(str(system).encode("utf-8"))
+    if system_bytes > _SYSTEM_PROMPT_BUDGET:
+        raise RuntimeError(
+            f"the system prompt is {system_bytes:,} bytes, over the "
+            f"{_SYSTEM_PROMPT_BUDGET:,}-byte limit the CLI can take as a "
+            "command-line argument. The persona sheet or the standing "
+            "contract has grown past what this provider can carry; shorten "
+            "it, or switch to the OpenAI-compatible HTTP provider, which has "
+            "no argv limit.")
+    scratch = tempfile.mkdtemp(prefix="assistant-claude-")
+    # Popen rather than subprocess.run so the child can be REGISTERED and
+    # therefore killed. A halt is checked at stage boundaries, and the
+    # boundaries sit on either side of this call — measured at 47s for a real
+    # turn — so without this the button's latency is one whole model call.
+    # `turnrun.current()` is None for a blocking turn or a test, and then this
+    # behaves exactly as `subprocess.run` did.
+    run = turnrun.current()
+    proc = None
+    try:
+        try:
+            proc = subprocess.Popen(argv, cwd=scratch, text=True,
+                                    stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise RuntimeError(f"could not run the Claude Code CLI: {exc}")
+        if run is not None:
+            run.register_process(proc)
+        try:
+            stdout, stderr = proc.communicate(input=user, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError(
+                f"the Claude Code CLI did not answer within {timeout:.0f}s")
+        done = _Completed(stdout, stderr, proc.returncode)
+    finally:
+        if run is not None and proc is not None:
+            run.unregister_process(proc)
+        shutil.rmtree(scratch, ignore_errors=True)
+    # A killed child exits without writing JSON. Ask the run whether that was
+    # us: a halt must surface as a halt, not as "the CLI returned nothing",
+    # which would send the user looking for a provider fault that never was.
+    if run is not None:
+        run.halted()
+    if not (done.stdout or "").strip():
+        raise RuntimeError(
+            "the Claude Code CLI returned nothing: "
+            + ((done.stderr or "").strip()[:300] or f"exit {done.returncode}"))
+    try:
+        envelope = json.loads(done.stdout)
+    except (TypeError, ValueError):
+        raise RuntimeError("the Claude Code CLI returned unparseable JSON: "
+                           + done.stdout[:300])
+    # `is_error` is the CLI's own verdict and it is NOT the exit code: a "Not
+    # logged in" answer comes back as subtype "success" with is_error true and
+    # the reason in `result`. Surfacing that text is the difference between
+    # "run /login" and a silent dead assistant.
+    if envelope.get("is_error"):
+        raise RuntimeError("the Claude Code CLI reported an error: "
+                           + str(envelope.get("result") or "")[:300])
+    return str(envelope.get("result") or "")
+
+
+def parse_model_json(raw):
+    """Tolerant JSON extraction from model output — fenced blocks, prose
+    around the object, trailing commas. Engine lineage: model output is
+    provisional until deterministic code validates it, and a parse failure is
+    a None the caller must handle, never an exception mid-pipeline."""
+    import re
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for candidate in (text, *re.findall(r"```(?:json)?\s*(.*?)```", text,
+                                        re.S)):
+        candidate = candidate.strip()
+        match = re.search(r"\{.*\}", candidate, re.S)
+        if not match:
+            continue
+        blob = re.sub(r",\s*([}\]])", r"\1", match.group(0))
+        try:
+            out = json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(out, dict):
+            return out
+    return None
