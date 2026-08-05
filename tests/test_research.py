@@ -308,3 +308,29 @@ def test_the_prior_travels_with_the_confidence(temp_db):
     entry = seen["open_research"][0]
     assert entry["opened_at"] == research.PRIOR_CONFIDENCE
     assert entry["confidence"] > entry["opened_at"], "the move is invisible"
+
+
+def test_re_asking_a_question_reuses_the_hypothesis_already_open(temp_db):
+    """EVIDENCE COULD NEVER ACCUMULATE, so nothing the epistemics is built on
+    could run. Nothing checked whether a question was already open, so
+    re-asking minted a second row and the evidence went there instead. The
+    live bank showed the end state exactly: 46 hypotheses, every one still
+    `open`, and every one carrying EXACTLY ONE piece of evidence — confidence
+    pinned to its prior, and a dispute (which needs two contradicting rows on
+    ONE hypothesis) impossible by construction."""
+    first = research.open_hypothesis("Does the cache survive a restart?", 1)
+    again = research.open_hypothesis("does the CACHE  survive a restart?", 5)
+    assert again["id"] == first["id"], "a re-asked question minted a new row"
+
+    other = research.open_hypothesis("Does the cache survive a crash?", 6)
+    assert other["id"] != first["id"], "distinct questions must stay distinct"
+
+
+def test_a_closed_hypothesis_does_not_absorb_a_fresh_question(temp_db):
+    """Reuse is for questions still under investigation. A settled one taking
+    on new evidence would silently reopen a conclusion nobody revisited."""
+    first = research.open_hypothesis("Is the index stale?", 1)
+    from db import qi
+    qi("UPDATE hypotheses SET status='closed' WHERE id=?", (first["id"],))
+    again = research.open_hypothesis("Is the index stale?", 2)
+    assert again["id"] != first["id"]

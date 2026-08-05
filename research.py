@@ -35,6 +35,7 @@
 
 import hashlib
 import json
+import re
 import time
 import urllib.parse
 
@@ -85,11 +86,44 @@ def _clamp(v, lo=0.0, hi=1.0):
         return lo
 
 
+def _normalised_question(text):
+    """One spelling of a question, for deciding whether it is already open.
+
+    Case, punctuation and whitespace ONLY — deliberately not similarity. The
+    bank's 46 hypotheses were measured before this was written: pairs on the
+    same topic score 0.16 to 1.00 on token overlap while genuinely different
+    pairs reach 0.71, so no threshold separates them and any fuzzy fold would
+    silently merge distinct questions. Exact-after-normalisation is the most
+    the data supports, and a fold that guesses is worse than none."""
+    return re.sub(r"[^a-z0-9 ]", "",
+                  " ".join(str(text or "").lower().split())).strip()
+
+
 def open_hypothesis(question, turn_idx, session_id=None):
     """A question under investigation starts at PRIOR_CONFIDENCE, not 0.5: an
     unresearched hypothesis leans toward "I do not know yet", and the
     asymmetry means supporting evidence must actually arrive before the
-    statement reads as likely."""
+    statement reads as likely.
+
+    ASKING THE SAME QUESTION AGAIN RETURNS THE HYPOTHESIS THAT ALREADY EXISTS.
+    Nothing checked, so re-asking minted a second row and the evidence went to
+    that one instead. Measured over the bank: 46 hypotheses, all `open`, and
+    every single one carried EXACTLY ONE piece of evidence — so confidence
+    never moved off its prior and a dispute, which needs two contradicting
+    rows on ONE hypothesis, was impossible by construction. The mechanism
+    DESIGN.md calls central had never once been able to run.
+
+    Reusing the id is what lets evidence accumulate, and evidence accumulating
+    is what the rest of the epistemics is built on. Folded here rather than
+    asked of the model: a caller who must remember to reuse an id will
+    forget, and a weaker model never knew to try."""
+    question = str(question or "").strip()
+    wanted = _normalised_question(question)
+    if wanted:
+        for row in q("SELECT id, question FROM hypotheses WHERE status='open' "
+                     "ORDER BY id") or []:
+            if _normalised_question(row["question"]) == wanted:
+                return get_hypothesis(row["id"])
     hid = qi("INSERT INTO hypotheses(session_id,question,statement,confidence,"
              "status,created_turn,updated_turn) VALUES(?,?,?,?,?,?,?)",
              (session_id, str(question or "").strip(), "", PRIOR_CONFIDENCE,

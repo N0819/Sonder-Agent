@@ -38,7 +38,7 @@ import subagents
 import tools_web
 import turnrun
 import workspace
-from db import (ensure_session, next_turn_idx, qi, state_get, state_put,
+from db import (ensure_session, next_turn_idx, q, qi, state_get, state_put,
                 transaction)
 from providers import chat_complete, chat_configured, parse_model_json
 
@@ -64,18 +64,74 @@ def _salience_of(text):
     return round(min(s, 0.95), 3)
 
 
-def _ground_evidence_list(refs, delivered, warnings, path):
+def _ref_in_bank(name):
+    """The STORED spelling of a ref, or "" when no such row exists anywhere.
+
+    TWO SPELLINGS OF ONE THING, folded where the data enters rather than at
+    each caller who must remember. Memory rows are keyed bare
+    (`turn:61:episode`) while evidence rows are keyed WITH their prefix
+    (`evidence:1335…`), so a model that writes `event:` in front of a memory
+    ref names a real row under a name nothing stores — and six citations to
+    rows that plainly existed were destroyed as inventions for exactly that."""
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    candidates = [name]
+    if name.startswith("event:"):
+        candidates.append(name[len("event:"):])
+    for cand in candidates:
+        for sql in ("SELECT 1 FROM memories WHERE event_key=? LIMIT 1",
+                    "SELECT 1 FROM evidence WHERE event_key=? LIMIT 1",
+                    "SELECT 1 FROM chunks WHERE chunk_key=? LIMIT 1"):
+            if q(sql, (cand,), one=True):
+                return cand
+    return ""
+
+
+def _ground_evidence_list(refs, delivered, warnings, path, *, bank_ok=False):
     """Engine citation discipline: keep refs that were delivered (or the
     literal "current", which names the user's message this turn); drop the
-    rest with a warning. Never invent one the model omitted."""
+    rest with a warning. Never invent one the model omitted.
+
+    `bank_ok` SEPARATES CITING FROM ACTING, and they are not the same risk.
+    Citing a real row the assistant produced earlier is honest bookkeeping.
+    DISCARDING a row it was never shown is a destructive act on something it
+    cannot have read — so retirement stays strictly delivered-only and passes
+    this flag false. A ref it was not shown is not a ref it may act on.
+
+    "I INVENTED THIS" AND "RECALL DID NOT SURFACE IT" NEED OPPOSITE
+    CORRECTIONS, and this told them apart by comparing against the delivered
+    set alone — so a row still sitting in the bank read exactly like a
+    fabrication. Measured over 71 turns: of 23 distinct dropped citations, 15
+    named rows that existed. The assistant was citing experiment results it
+    had produced itself 8 to 34 turns earlier, being told they were
+    ungrounded, and re-running the experiment to get them back — nine
+    hypotheses on one question across turns 38 to 70.
+
+    So a ref the bank can resolve is KEPT, and the fact that recall missed it
+    is reported rather than the citation destroyed. What the gate still
+    refuses is the thing it was actually built to refuse: a name that
+    corresponds to nothing."""
     grounded = []
     for ref in refs or []:
         name = str(ref or "").strip()
         if name == "current" or name in delivered:
             if name not in grounded:
                 grounded.append(name)
-        else:
-            warnings.append(f"dropped ungrounded {path} citation {name!r}")
+            continue
+        stored = _ref_in_bank(name) if bank_ok else ""
+        if stored:
+            if stored not in grounded:
+                grounded.append(stored)
+            # Not a failure of the citation; a failure of retrieval. Named as
+            # such so the recall miss is countable instead of arriving
+            # disguised as the model making things up.
+            warnings.append(
+                f"kept {path} citation {name!r}: it is in the bank, but "
+                "recall did not surface it this turn")
+            continue
+        warnings.append(f"dropped ungrounded {path} citation {name!r} — no "
+                        "such row exists")
     return grounded
 
 
@@ -549,14 +605,15 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
     # -- Stage 3: ground (deterministic) --
     out["memory_evidence_used"] = _ground_evidence_list(
         out.get("memory_evidence_used"), delivered, warnings,
-        "memory_evidence")
+        "memory_evidence", bank_ok=True)
     model_updates = []
     for update in out.get("user_model_updates") or []:
         if not isinstance(update, dict) or not str(
                 update.get("claim") or "").strip():
             continue
         evidence = _ground_evidence_list(update.get("evidence"), delivered,
-                                         warnings, "user_model evidence")
+                                         warnings, "user_model evidence",
+                                         bank_ok=True)
         if not evidence:
             warnings.append(
                 "dropped user_model update with no grounded evidence: "

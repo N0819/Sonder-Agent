@@ -421,3 +421,66 @@ def test_a_turn_records_what_it_cost_and_where(temp_db):
     # rather than folded into a total.
     assert "memory" in cost["sections"]
     assert cost["sections"]["user_message"] > 0
+
+
+def _mint_ref(key, content):
+    return memory.add_memory("semantic", "told", 0.7, content,
+                             turn_idx=1, event_key=key)
+
+
+def test_a_citation_recall_missed_is_kept_not_called_invented(temp_db):
+    """"I INVENTED THIS" AND "RECALL DID NOT SURFACE IT" NEEDED OPPOSITE
+    CORRECTIONS AND GOT THE SAME ONE. The gate compared refs against the
+    delivered set alone, so a row still sitting in the bank read exactly like
+    a fabrication. Measured over 71 live turns: of 23 distinct dropped
+    citations, 15 named rows that existed — experiment results the assistant
+    had produced itself 8 to 34 turns earlier. Told its own findings were
+    ungrounded, it re-ran the experiments to get them back, minting nine
+    hypotheses on one question between turns 38 and 70."""
+    _mint_ref("real:but:not:recalled", "a finding from many turns ago")
+    warnings = []
+    kept = pipeline._ground_evidence_list(
+        ["real:but:not:recalled"], set(), warnings, "memory_evidence",
+        bank_ok=True)
+
+    assert kept == ["real:but:not:recalled"]
+    assert any("recall did not surface it" in w for w in warnings)
+    assert not any("dropped" in w for w in warnings)
+
+
+def test_a_citation_to_nothing_is_still_refused(temp_db):
+    """The gate keeps the job it was actually built for. Resolving real rows
+    must not become "accept any string the model wrote"."""
+    warnings = []
+    kept = pipeline._ground_evidence_list(
+        ["no:such:row"], set(), warnings, "memory_evidence", bank_ok=True)
+
+    assert kept == []
+    assert any("ungrounded" in w and "no such row" in w for w in warnings)
+
+
+def test_a_memory_ref_written_with_the_event_prefix_still_resolves(temp_db):
+    """TWO SPELLINGS OF ONE THING. Memory rows are keyed bare
+    (`turn:61:episode`) and evidence rows keyed WITH their prefix, so a model
+    writing `event:` in front of a memory ref named a real row under a name
+    nothing stores. Six live citations died that way."""
+    _mint_ref("turn:61:episode", "what happened on turn 61")
+    warnings = []
+    kept = pipeline._ground_evidence_list(
+        ["event:turn:61:episode"], set(), warnings, "memory_evidence",
+        bank_ok=True)
+
+    assert kept == ["turn:61:episode"], "the stored spelling is what is kept"
+
+
+def test_discarding_a_memory_still_requires_having_been_shown_it(temp_db):
+    """CITING IS NOT DISCARDING. Letting a citation resolve from the bank must
+    not also let the model retire a row it was never shown — that is a
+    destructive act on something it cannot have read."""
+    _mint_ref("real:but:not:recalled", "a memory the model was never shown")
+    warnings = []
+    kept = pipeline._ground_evidence_list(
+        ["real:but:not:recalled"], set(), warnings, "retire")
+
+    assert kept == []
+    assert any("ungrounded" in w for w in warnings)
