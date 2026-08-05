@@ -150,3 +150,41 @@ button.danger { background: #3b2530; color: #f7768e; }
 .msg.user .retry-corner { display: none; }
 /* A dropped pipe is a status line, never an error bubble: the turn is fine. */
 .dropped { margin-top: .35rem; font-size: .78rem; color: #c9a86a; }
+
+/* ---- History: prior sessions and their traces ---- */
+/* The panel is a flex column, so the grid claims the leftover height with
+   flex:1 rather than 100% — and `min-height:0` is what lets the two columns
+   actually scroll instead of growing the page. */
+#history { display: grid; grid-template-columns: 20rem 1fr; gap: 1rem;
+  flex: 1; min-height: 0; }
+#sessions { overflow-y: auto; display: flex; flex-direction: column;
+  gap: .3rem; padding-right: .3rem; }
+#session-turns { overflow-y: auto; padding-right: .3rem; }
+.session-row { display: flex; flex-direction: column; align-items: flex-start;
+  gap: .15rem; text-align: left; width: 100%; padding: .5rem .6rem;
+  background: #22262d; border: 1px solid #2a2e35; border-radius: .4rem;
+  color: #dfe4ea; cursor: pointer; font: inherit; }
+.session-row:hover { border-color: #3a4656; }
+.session-row.active { border-color: #4a7fb5; background: #24405e; }
+.session-sub { font-size: .78rem; color: #77808c; }
+.session-bar { display: flex; align-items: center; gap: .8rem;
+  margin-bottom: .6rem; }
+.resume { padding: .35rem .7rem; background: #24405e; color: #eef1f5;
+  border: 1px solid #4a7fb5; border-radius: .4rem; cursor: pointer;
+  font: inherit; }
+.turn-card { background: #1b1f25; border: 1px solid #2a2e35;
+  border-radius: .5rem; padding: .6rem .7rem; margin-bottom: .7rem; }
+.turn-head { font-size: .78rem; color: #77808c; margin-bottom: .4rem; }
+.turn-said { white-space: pre-wrap; margin-bottom: .5rem; }
+.turn-said.user { color: #9fb6d0; border-left: 2px solid #24405e;
+  padding-left: .5rem; }
+.trace-section { margin-top: .2rem; }
+/* The trace expanders reuse the reasoning panel's classes but live outside
+   `.reasoning-step`, whose rules are scoped to it — so they need their own. */
+.trace-section .step-head { font-size: .78rem; color: #8b95a3;
+  cursor: pointer; padding: .1rem 0; font-family: ui-monospace, monospace; }
+.trace-section .step-head:hover { color: #b9c2cf; }
+.trace-section .step-detail { font-size: .74rem; color: #77808c;
+  white-space: pre-wrap; padding: .15rem 0 .3rem .9rem;
+  border-left: 1px solid #2a2e35; margin: .1rem 0 .2rem .2rem;
+  max-height: 20rem; overflow-y: auto; }

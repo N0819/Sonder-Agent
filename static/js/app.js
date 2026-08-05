@@ -115,6 +115,7 @@ document.addEventListener('DOMContentLoaded', function () {
       btn.classList.add('active');
       document.getElementById('panel-' + btn.dataset.panel)
         .classList.add('active');
+      if (btn.dataset.panel === 'history') loadHistory();
       if (btn.dataset.panel === 'memory') loadMemories('');
       if (btn.dataset.panel === 'research') loadResearch();
       if (btn.dataset.panel === 'beliefs') loadBeliefs();

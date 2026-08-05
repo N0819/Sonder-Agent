@@ -12,6 +12,7 @@
     <h1>Sonder Assistant</h1>
     <nav>
       <button data-panel="chat" class="active">Chat</button>
+      <button data-panel="history">History</button>
       <button data-panel="memory">Memory</button>
       <button data-panel="research">Research</button>
       <button data-panel="beliefs">Beliefs</button>
@@ -43,6 +44,14 @@ you stop it. You can still type while it runs.">
            reaches the run at its next round boundary instead of queueing
            behind work it would have changed. -->
       <div id="running-hint" style="display:none"></div>
+    </section>
+    <!-- Prior sessions and their traces. The routes existed from the start
+         and nothing ever called them, so a reload abandoned the thread. -->
+    <section id="panel-history" class="panel">
+      <div id="history">
+        <div id="sessions"></div>
+        <div id="session-turns"></div>
+      </div>
     </section>
     <section id="panel-memory" class="panel">
       <form id="memsearch"><input id="memquery"
@@ -109,6 +118,7 @@ you stop it. You can still type while it runs.">
 <!-- Browser globals, no bundler, load order matters — engine convention. -->
 <script src="/static/js/utils.js"></script>
 <script src="/static/js/chat.js"></script>
+<script src="/static/js/history.js"></script>
 <script src="/static/js/app.js"></script>
 <script src="/static/js/controls.js"></script>
 </body>

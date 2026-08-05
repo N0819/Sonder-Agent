@@ -183,7 +183,18 @@ def chat_halt(run_id: str):
 
 @app.get("/api/sessions")
 def sessions():
-    rows = q("SELECT s.id, s.title, s.created, COUNT(t.id) AS turns "
+    """Every session, newest first, with something to recognise it by.
+
+    `title` is empty on all 29 sessions this project has ever recorded —
+    nothing writes it — so a list keyed on it is twenty-nine rows reading
+    "(untitled)", which is the failure `persona_warnings` exists for: a field
+    that is empty reads as present and the list looks like a rendering bug.
+    The opening line is what a person actually remembers a conversation by,
+    and it is already on disk."""
+    rows = q("SELECT s.id, s.title, s.created, COUNT(t.id) AS turns, "
+             "       (SELECT substr(user_text, 1, 120) FROM turns "
+             "        WHERE session_id = s.id AND user_text <> '' "
+             "        ORDER BY turn_idx LIMIT 1) AS opened_with "
              "FROM sessions s LEFT JOIN turns t ON t.session_id=s.id "
              "GROUP BY s.id ORDER BY s.id DESC")
     return [dict(r) for r in rows]

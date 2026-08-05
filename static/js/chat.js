@@ -73,6 +73,33 @@ function addMsg(cls, text, warnings, askedText) {
   return node;
 }
 
+// Pick up a session that already exists, transcript and all.
+//
+// `sessionId` was write-once-per-page and only ever set from a turn this page
+// had run, so a reload silently founded a new session and left the old one
+// unreachable from the interface. Recall, beliefs and the episode chain all
+// key off the id — a conversation continued under a new one is a different
+// conversation as far as the assistant is concerned — so this is what makes
+// the History panel more than a reader.
+//
+// Refused mid-turn: swapping the session under a running turn would commit it
+// against an id it did not start with.
+function adoptSession(id, turns) {
+  if (sending) return false;
+  sessionId = id;
+  const log = document.getElementById('log');
+  log.textContent = '';
+  (turns || []).forEach(function (t) {
+    if (t.user_text) addMsg('user', t.user_text);
+    addMsg('assistant', t.reply_text || '(no reply)',
+           (t.trace || {}).warnings, t.user_text);
+  });
+  addMsg('meta', 'Continuing session #' + id
+                 + '. The next message joins this thread.');
+  document.querySelector('nav button[data-panel="chat"]').click();
+  return true;
+}
+
 // Offer a retry on the message that failed, carrying the text with it.
 //
 // A turn whose respond stage died still COMMITS: memory records the exchange
