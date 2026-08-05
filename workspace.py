@@ -729,6 +729,11 @@ SNAPSHOT_BINARY_MAX = 2 << 20
 # Where the snapshot declares itself. A leading underscore and a full sentence
 # for a name, because it shares a namespace with the user's own files.
 WITHHELD_MANIFEST = "_withheld_from_this_workspace.md"
+# How much of the manifest goes to naming individual files. The
+# per-directory roll-up above it is never bounded — it is the part that
+# answers "is this subtree here?", and a bound on THAT is what let a whole
+# `tools/` directory vanish from a list of what had vanished.
+WITHHELD_DETAIL_CHARS = 40_000
 
 
 # THE BYTE CEILING IS THE HONEST CONSTRAINT; the file count was costing
@@ -831,14 +836,32 @@ def snapshot_for_sandbox(session_id, max_bytes=SNAPSHOT_MAX_BYTES,
 
 def _withheld_note(delivered, withheld):
     """The manifest. Written to be read by something that is about to
-    conclude a file does not exist."""
-    shown = withheld[:60]
+    conclude a file does not exist.
+
+    THE DIRECTORY ROLL-UP IS COMPLETE AND COMES FIRST; the per-file list is
+    the bounded part. It was the other way round, capped at 60 entries of 192,
+    and the cap fell exactly where it did the most harm: not one of the 33
+    files under `tools/` was named. A subagent classified nine failing test
+    modules, found five of them raising `ModuleNotFoundError` on `tools`, and
+    recorded that against the project — the manifest built to catch precisely
+    that could not answer, because the whole directory had fallen off the end
+    of a display limit.
+
+    "Named, not counted" was the rule this file was written to serve, and a
+    list truncated at 60 is counted again for everything past 60. Every
+    withheld DIRECTORY is now always named with its file count, so "is this
+    subtree here?" — the question that keeps going wrong — is always
+    answerable, and only the file-by-file detail is subject to a budget."""
+    by_dir = {}
+    for path, _why in withheld:
+        parent = os.path.dirname(str(path).replace("\\", "/")) or "."
+        by_dir[parent] = by_dir.get(parent, 0) + 1
+    total = delivered + len(withheld)
     lines = [
         "# Files NOT in this workspace",
         "",
-        f"This workspace holds {delivered} of {delivered + len(withheld)} "
-        "files from the source tree. The rest were withheld by size and count "
-        "limits, listed below.",
+        f"This workspace holds {delivered} of {total} files from the source "
+        "tree. The rest were withheld by size and count limits.",
         "",
         "**A path missing from here may still exist in the real tree.** Do "
         "not conclude that a file, a directory or a whole test suite is "
@@ -846,8 +869,22 @@ def _withheld_note(delivered, withheld):
         "this workspace did not find it. Say what you searched and say that "
         "the workspace is partial.",
         "",
+        f"## Every directory with something withheld ({len(by_dir)}, complete)",
+        "",
     ]
-    lines += [f"- `{path}` — {why}" for path, why in shown]
-    if len(withheld) > len(shown):
-        lines.append(f"- …and {len(withheld) - len(shown)} more")
+    lines += [f"- `{d}/` — {n} file(s) withheld"
+              for d, n in sorted(by_dir.items())]
+    lines += ["", f"## The files themselves ({len(withheld)})", ""]
+    spent, shown = 0, 0
+    for path, why in withheld:
+        entry = f"- `{path}` — {why}"
+        if spent + len(entry) > WITHHELD_DETAIL_CHARS:
+            break
+        lines.append(entry)
+        spent += len(entry)
+        shown += 1
+    if shown < len(withheld):
+        lines.append(f"- …and {len(withheld) - shown} more — the directory "
+                     "roll-up above is complete, so check it before "
+                     "concluding anything is absent")
     return "\n".join(lines) + "\n"

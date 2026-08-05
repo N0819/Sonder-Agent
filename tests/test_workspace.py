@@ -290,3 +290,32 @@ def test_the_files_a_delivered_suite_needs_to_import_arrive_with_it(ws):
     # The ceiling is the size of the tree, not a round number with headroom:
     # raising it past this buys nothing, which is why it stops here.
     assert workspace.SNAPSHOT_MAX_BYTES == 12 << 20
+
+
+def test_a_withheld_directory_is_always_named_however_many_files_it_holds(ws):
+    """The per-file list was capped at 60 of 192, and the cap fell exactly
+    where it did the most harm: not one of the 33 files under `tools/` was
+    named. A subagent then classified nine failing test modules, found five
+    raising `ModuleNotFoundError` on `tools`, and recorded that against the
+    project — the manifest built to catch precisely that could not answer,
+    because the whole directory had fallen off the end of a display limit.
+    "Named, not counted" is the rule this file serves, and a list truncated
+    at 60 is counted again for everything past it."""
+    root = workspace.session_root(1)
+    os.makedirs(os.path.join(root, "tools"), exist_ok=True)
+    for n in range(400):
+        with open(os.path.join(root, f"f{n:03}.py"), "w") as fh:
+            fh.write("x" * 900)
+    # OLDEST, so the newest-first listing puts the whole subtree past both the
+    # byte ceiling and any per-file display budget — which is exactly where it
+    # sat in the real workspace.
+    for n in range(33):
+        path = os.path.join(root, "tools", f"t{n}.py")
+        with open(path, "w") as fh:
+            fh.write("y" * 900)
+        os.utime(path, (1_000_000, 1_000_000))
+    snapshot = workspace.snapshot_for_sandbox(1, max_bytes=64_000)
+    note = snapshot[workspace.WITHHELD_MANIFEST]
+    assert "`tools/` — " in note, "the subtree must be nameable"
+    # The roll-up is complete; only the file-by-file detail is bounded.
+    assert "complete)" in note
