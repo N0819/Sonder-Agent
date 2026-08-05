@@ -213,6 +213,71 @@ function reasoningLine(ev) {
   return ev.stage;
 }
 
+// EVERY FIELD, RENDERED AS TEXT — because the curated line is a summary and a
+// summary is not the data. Each stage's line picks a handful of fields by
+// hand, so everything else the engine emitted — the full task, the whole
+// observation, a subagent's claims, what it could not establish — arrived in
+// the browser and was dropped on the floor. The panel showed a sentence about
+// a JSON object nobody could open.
+//
+// Rendered rather than dumped: `JSON.stringify` is technically the same
+// information and practically unreadable, which is how the raw view already
+// behaves and why nobody uses it. Keys become labels, nesting becomes
+// indentation, and a string stays a string.
+const HIDDEN_KEYS = ['t', 'stage', 'seq', 'ts'];
+
+function readable(value, indent) {
+  const pad = '  '.repeat(indent);
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) {
+    if (!value.length) return '';
+    return value.map(function (item, n) {
+      const body = readable(item, indent + 1);
+      if (!body) return '';
+      // A list of plain values stays on one line each; a list of objects gets
+      // a numbered block, because "claim 3" is how a reader refers to it.
+      return (typeof item === 'object' && item !== null)
+        ? pad + (n + 1) + '.\n' + body
+        : pad + '- ' + String(item);
+    }).filter(Boolean).join('\n');
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value).map(function (k) {
+      const body = readable(value[k], indent + 1);
+      if (!body) return '';
+      // A list always gets the block form. Collapsed inline, its "- " item
+      // marker ends up mid-sentence after the label and reads as punctuation.
+      return (!Array.isArray(value[k]) && body.indexOf('\n') === -1
+              && body.length < 70)
+        ? pad + k + ': ' + body.trim()
+        : pad + k + ':\n' + body;
+    }).filter(Boolean).join('\n');
+  }
+  const text = String(value);
+  if (!text.trim()) return '';
+  // Multi-line strings keep their own shape; every line gets the indent so a
+  // paragraph does not escape its label.
+  return text.split('\n').map(function (ln) { return pad + ln; }).join('\n');
+}
+
+function extraDetail(ev, summary) {
+  const seen = String(summary || '');
+  const parts = [];
+  Object.keys(ev).forEach(function (k) {
+    if (HIDDEN_KEYS.indexOf(k) !== -1) return;
+    const v = ev[k];
+    if (v === null || v === undefined || v === '') return;
+    // Already in the line above: showing it twice is noise, not detail.
+    if (typeof v !== 'object' && seen.indexOf(String(v)) !== -1) return;
+    const body = readable(v, 1);
+    if (!body) return;
+    parts.push((!Array.isArray(v) && body.indexOf('\n') === -1
+                && body.length < 70)
+      ? k + ': ' + body.trim() : k + ':\n' + body);
+  });
+  return parts.join('\n');
+}
+
 function reasoningStep(ev, line) {
   // EVERY STAGE CARRIES MORE THAN ITS HEADLINE, and dumping all of it made
   // the panel a wall nobody read — the gists behind a recall, the query
@@ -220,7 +285,9 @@ function reasoningStep(ev, line) {
   // the rest opens on click, so scanning and reading are different acts.
   const parts = line.split('\n');
   const summary = parts[0];
-  const detail = parts.slice(1).join('\n');
+  const curated = parts.slice(1).join('\n');
+  const rest = extraDetail(ev, line);
+  const detail = [curated, rest].filter(Boolean).join('\n');
   const row = el('<div class="reasoning-step"></div>');
   const head = el('<div class="step-head"></div>');
   head.textContent = '[' + ev.t.toFixed(1) + 's] ' + summary;

@@ -954,7 +954,17 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
             if run is not None:
                 run.emit("subagent", state="reported", kind="scout",
                          task=label, evidence=len(out.get("evidence") or []),
-                         summary=str(out.get("summary") or "")[:160])
+                         summary=str(out.get("summary") or ""),
+                         found=[{"claim": str(c.get("claim") or ""),
+                                 "confidence": c.get("confidence")}
+                                for c in (out.get("claims") or [])[:8]
+                                if isinstance(c, dict)],
+                         sources=[str(e.get("url") or e.get("title") or "")
+                                  for e in (out.get("evidence") or [])[:8]
+                                  if isinstance(e, dict)],
+                         could_not_establish=[
+                             str(x) for x in
+                             (out.get("could_not_establish") or [])[:6]])
             return out
     # Budget spent without a report: return what was actually gathered rather
     # than nothing, and say plainly that it is incomplete.
@@ -1239,11 +1249,31 @@ def _converse(proc, task_payload, *, session_id, turn_idx, assignment=None,
             report = message.get("report") or {}
             if run is not None:
                 run.unregister_process(proc)
+                # THE COUNTS WERE NOT THE REPORT. This emitted "3 claims, 4
+                # evidence" and 160 characters of summary, so the one thing a
+                # reader wanted — what the subagent actually concluded, and
+                # what it could not settle — reached the browser as arithmetic.
+                # The report is already in hand here; sending its text costs
+                # nothing and is the only place the UI can get it, because the
+                # subagent's scratch database is torn down after this.
                 run.emit("subagent", state="reported", kind="deep",
                          task=label,
                          claims=len(report.get("claims") or []),
                          evidence=len(report.get("evidence") or []),
-                         summary=str(report.get("summary") or "")[:160])
+                         summary=str(report.get("summary") or ""),
+                         found=[{"claim": str(c.get("claim") or ""),
+                                 "confidence": c.get("confidence")}
+                                for c in (report.get("claims") or [])[:8]
+                                if isinstance(c, dict)],
+                         sources=[str(e.get("url") or e.get("title") or "")
+                                  for e in (report.get("evidence") or [])[:8]
+                                  if isinstance(e, dict)],
+                         could_not_establish=[
+                             str(x) for x in
+                             (report.get("could_not_establish") or [])[:6]],
+                         open_questions=[
+                             str(x) for x in
+                             (report.get("open_questions") or [])[:6]])
             return report
         if kind == "message" and cohort is not None:
             if run is not None:
