@@ -137,8 +137,16 @@ def _fit_observation(text, limit=OBSERVATION_CHARS):
     if len(text) <= limit:
         return text
     marker = f"\n… [{len(text) - limit:,} chars elided from the middle] …\n"
-    tail = limit - _OBSERVATION_HEAD - len(marker)
-    return text[:_OBSERVATION_HEAD] + marker + text[-tail:]
+    # A THIRD OF WHATEVER BUDGET IT IS GIVEN. The head is a fixed 1,200 for
+    # the 4,000-char row, but the evidence excerpt is 600 — and a fixed head
+    # wider than the budget yields a negative tail, which is a slice from the
+    # front wearing the marker of a slice from both ends. The tail must always
+    # be the larger share: it is the half that carries the answer.
+    head = min(_OBSERVATION_HEAD, max(0, (limit - len(marker)) // 3))
+    tail = limit - head - len(marker)
+    if tail <= 0:                       # a budget too small to say anything
+        return text[:limit]
+    return text[:head] + marker + text[-tail:]
 
 
 def _observation_text(result):
@@ -449,7 +457,17 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
         hypothesis_id,
         url=_experiment_ref(digest),
         title=f"experiment ({outcome}): {note or 'code run'}",
-        excerpt=f"{why}. {observation}",
+        # FIT IT HERE, WHERE THE SHAPE OF THE TEXT IS KNOWN. The evidence
+        # excerpt is what the model reads back — the 4,000-char row above is
+        # for forensics — and `record_evidence` cuts head-first, which is
+        # right for a web page and exactly wrong for a test runner: pytest
+        # writes `N passed, M failed` as its LAST line. Measured on a real
+        # suite run: 19,776 characters of stdout, of which the excerpt kept
+        # the first 600 — a mid-list slice of node ids, no counts, no error
+        # roster. The assistant reported the count as unreachable and rebuilt
+        # its instrument around the gap.
+        excerpt=_fit_observation(f"{why}. {observation}",
+                                 research.EXCERPT_CHARS),
         stance=stance, turn_idx=turn_idx)
     return {"outcome": outcome, "why": why, "result": result,
             "evidence": evidence, "repeated": repeated}

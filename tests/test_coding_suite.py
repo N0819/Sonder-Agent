@@ -797,3 +797,35 @@ def test_a_short_observation_is_stored_exactly(temp_db):
     """The common case must not grow a marker it did not earn."""
     assert coding._fit_observation("exit 0 in 0.1s — stdout: ok") == \
         "exit 0 in 0.1s — stdout: ok"
+
+
+def test_the_excerpt_the_model_reads_keeps_the_counts(temp_db):
+    """The 4,000-char experiments row is for forensics; the EVIDENCE excerpt
+    is what the model reads back, and `record_evidence` cuts head-first —
+    right for a web page, exactly wrong for a test runner, which writes
+    `N passed, M failed` last. Measured on a real suite run: 19,776 characters
+    of stdout, of which the excerpt kept the first 600 — a mid-list slice of
+    node ids, no counts, no error roster. The assistant reported the count as
+    unreachable and rebuilt its instrument around the gap."""
+    hyp = research.open_hypothesis("does the suite pass?", 1)
+    noise = "\n".join(f"tests/test_m.py::case_{n}" for n in range(900))
+    out = coding.run_experiment(
+        hyp["id"],
+        source=f"print({noise!r})\nprint('4571 passed, 3 failed')",
+        expect={"stdout_contains_nothing_useful": 1,
+                "exit_zero": True}, turn_idx=1)
+    from db import q
+    row = q("SELECT excerpt, excerpt_chars FROM evidence WHERE id=?",
+            (out["evidence"]["id"],), one=True)
+    assert "4571 passed, 3 failed" in row["excerpt"]
+    assert len(row["excerpt"]) <= research.EXCERPT_CHARS
+    assert "elided from the middle" in row["excerpt"]
+
+
+def test_a_budget_smaller_than_the_head_still_leaves_a_tail(temp_db):
+    """A fixed head wider than the budget yields a negative tail — a slice
+    from the front wearing the marker of a slice from both ends."""
+    text = "HEAD" + ("x" * 5000) + "TAIL"
+    fitted = coding._fit_observation(text, 200)
+    assert len(fitted) <= 200
+    assert fitted.endswith("TAIL")

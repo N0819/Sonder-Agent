@@ -318,6 +318,12 @@ def same_source(left, right):
     return bool(left) and left == right
 
 
+# What one evidence row keeps of its source. Named because a second module
+# now has to fit text to it, and two spellings of one number is how they
+# drift apart.
+EXCERPT_CHARS = 600
+
+
 def record_evidence(hid, *, url, title, excerpt, stance, turn_idx,
                     claim_hint=""):
     """One evidence row + its `read` memory + the deterministic confidence
@@ -342,11 +348,19 @@ def record_evidence(hid, *, url, title, excerpt, stance, turn_idx,
     #
     # Marked in the TEXT as well as counted in the column, because the text is
     # what the model reads back and a column it is never shown cannot warn it.
+    #
+    # HEAD-FIRST IS RIGHT HERE AND WRONG FOR ONE CALLER. A web source opens
+    # with what it is about, so the first 600 characters are the useful 600.
+    # A test runner is the opposite: the counts are the last line it writes.
+    # `coding` therefore fits its own text to `EXCERPT_CHARS` before calling,
+    # keeping both ends; this cut then never fires on it. The rule lives with
+    # the caller that knows the shape of its content, rather than becoming a
+    # second policy here that every future caller has to be told about.
     excerpt = " ".join(str(excerpt or "").split())
     excerpt_chars = len(excerpt)
-    if excerpt_chars > 600:
+    if excerpt_chars > EXCERPT_CHARS:
         marker = f" …[cut: {excerpt_chars} chars total]"
-        excerpt = excerpt[:600 - len(marker)] + marker
+        excerpt = excerpt[:EXCERPT_CHARS - len(marker)] + marker
     # Idempotency: the same page cited for the same hypothesis is one row.
     # Without this, a loop that re-fetches a good source pumps confidence by
     # repetition — the popularity loop again, wearing "corroboration".
