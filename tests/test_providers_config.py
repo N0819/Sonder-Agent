@@ -101,6 +101,48 @@ def test_the_identity_stamp_matches_what_will_be_written(temp_db):
 
 # ---- The CLI provider's transport ----
 
+def _fake_cli(seen, out_lines, err_lines=(), returncode=0, stall=0.0):
+    """A stand-in for the streamed CLI process.
+
+    Models the pipes rather than `communicate`, because that is what the
+    provider now drives: a writer thread feeding stdin while readers drain
+    stdout and stderr. A fake that accepts the whole prompt in one call cannot
+    exercise the deadlock this shape exists to avoid."""
+    import io
+    import time as _time
+
+    class FakeStdin:
+        def __init__(self):
+            self.parts = []
+
+        def write(self, data):
+            self.parts.append(data)
+            seen["stdin"] = "".join(self.parts)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeProc:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = io.StringIO("".join(l + "\n" for l in out_lines))
+            self.stderr = io.StringIO("".join(l + "\n" for l in err_lines))
+            self.returncode = returncode
+            self.killed = False
+            if stall:
+                _time.sleep(0)
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+    return FakeProc()
+
 def test_a_large_payload_goes_on_stdin_not_argv(temp_db, monkeypatch):
     """`[Errno 7] Argument list too long`. The payload was passed as a
     trailing argv entry, and Linux caps a SINGLE entry at MAX_ARG_STRLEN
@@ -109,24 +151,20 @@ def test_a_large_payload_goes_on_stdin_not_argv(temp_db, monkeypatch):
     codemap alone for a 115-file upload, before memory or beliefs were added.
     The user saw "respond stage failed", which named nothing actionable."""
     seen = {}
-
-    class FakeProc:
-        returncode = 0
-
-        def communicate(self, input=None, timeout=None):
-            seen["input"] = input
-            return '{"is_error": false, "result": "ok"}', ""
+    proc = _fake_cli(seen, ['{"type": "result", "is_error": false, '
+                            '"result": "ok"}'])
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
 
     def fake_popen(argv, **kw):
         seen["argv"] = argv
-        return FakeProc()
+        return proc
 
-    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
     monkeypatch.setattr(providers.subprocess, "Popen", fake_popen)
     payload = "x" * 200_000
-    providers._claude_code_complete(
+    out = providers._claude_code_complete(
         {"claude_binary": "claude", "claude_timeout": 30.0}, "sys", payload)
-    assert seen["input"] == payload
+    assert out == "ok"
+    assert seen["stdin"] == payload
     assert not any(len(a) > providers.MAX_ARGV_ENTRY_BYTES
                    for a in seen["argv"])
 
@@ -434,3 +472,190 @@ def test_rebuilt_rows_are_retrievable_again(temp_db, monkeypatch):
     memory.rebuild_embeddings()
     _payload, internal = memory.build_memory_context(5, "deployment pipeline")
     assert internal["retrieval_health"]["vector_incomparable_rows"] == 0
+
+
+# ---- Two bounds, because there are two failures ----
+
+def test_a_slow_but_talking_cli_is_not_killed(temp_db, monkeypatch):
+    """THE TIMEOUT MEASURED THE WRONG THING. One wall clock cannot tell a
+    model that is thinking hard from one that has hung, so a real answer past
+    180 seconds was killed mid-sentence and surfaced as "respond stage
+    failed" — which reads as a fault and is not one.
+
+    This run takes longer than its own idle bound in total, and never goes
+    silent for that long. It must survive."""
+    import io
+    seen = {}
+
+    class Trickle(io.StringIO):
+        """Events arriving slowly, one per read, as a real stream does."""
+
+        def __iter__(self):
+            import time as _t
+            for line in ('{"type": "assistant", "message": {"content": '
+                         '[{"type": "text", "text": "thinking..."}]}}',
+                         '{"type": "assistant", "message": {"content": '
+                         '[{"type": "text", "text": " still going"}]}}',
+                         '{"type": "result", "is_error": false, '
+                         '"result": "the answer"}'):
+                _t.sleep(0.15)
+                yield line + "\n"
+
+    proc = _fake_cli(seen, [])
+    proc.stdout = Trickle()
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(providers.subprocess, "Popen",
+                        lambda argv, **kw: proc)
+    out = providers._claude_code_complete(
+        # An idle bound SHORTER than the total run: the point of the split.
+        {"claude_binary": "claude", "claude_idle_timeout": 0.3,
+         "claude_timeout": 30.0}, "sys", "user")
+    assert out == "the answer"
+    assert proc.killed is False, "a talking process was killed"
+
+
+def test_a_silent_cli_is_killed_and_the_bound_is_named(temp_db, monkeypatch):
+    """The other half. An error that says only "it timed out" sends whoever
+    reads it to raise whichever number they happen to find."""
+    import io
+    seen = {}
+
+    class Silence(io.StringIO):
+        def __iter__(self):
+            import time as _t
+            _t.sleep(5)
+            return iter(())
+
+    proc = _fake_cli(seen, [])
+    proc.stdout = Silence()
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(providers.subprocess, "Popen",
+                        lambda argv, **kw: proc)
+    with pytest.raises(RuntimeError) as caught:
+        providers._claude_code_complete(
+            {"claude_binary": "claude", "claude_idle_timeout": 0.4,
+             "claude_timeout": 30.0}, "sys", "user")
+    assert "went silent" in str(caught.value)
+    assert "claude_idle_timeout" in str(caught.value), "the fix is unnamed"
+    assert proc.killed is True
+
+
+def test_the_result_is_read_from_the_end_of_the_transcript(temp_db):
+    """A stream-json transcript holds many objects and only the last is the
+    answer. Scanning forward finds an `assistant` event and mistakes a partial
+    message for the result — which would silently return the first sentence of
+    a long reply as though it were the whole thing."""
+    transcript = "\n".join([
+        '{"type": "system", "subtype": "init"}',
+        '{"type": "assistant", "message": {"content": '
+        '[{"type": "text", "text": "partial"}]}}',
+        'not json at all',
+        '{"type": "result", "is_error": false, "result": "the whole answer"}',
+    ])
+    envelope = providers._result_envelope(transcript)
+    assert envelope["result"] == "the whole answer"
+    assert providers._result_envelope("") is None
+    assert providers._result_envelope("garbage") is None
+
+
+def test_the_streamed_text_reaches_the_watching_turn(temp_db, monkeypatch):
+    """"See it as it streams" is only true if the tokens reach the run. The
+    deltas are throttled, so the assertion is on the reassembled text rather
+    than on a count of events."""
+    import io
+
+    import turnrun
+    seen = {}
+    run = turnrun.create("hello", None)
+    turnrun.bind(run)
+
+    class Trickle(io.StringIO):
+        def __iter__(self):
+            import time as _t
+            for word in ("Once ", "upon ", "a ", "time"):
+                _t.sleep(0.45)      # past the throttle, so each one emits
+                yield ('{"type": "assistant", "message": {"content": '
+                       '[{"type": "text", "text": "%s"}]}}\n' % word)
+            yield ('{"type": "result", "is_error": false, '
+                   '"result": "Once upon a time"}\n')
+
+    proc = _fake_cli(seen, [])
+    proc.stdout = Trickle()
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(providers.subprocess, "Popen",
+                        lambda argv, **kw: proc)
+    try:
+        providers._claude_code_complete(
+            {"claude_binary": "claude", "claude_idle_timeout": 5.0}, "s", "u")
+    finally:
+        turnrun.bind(None)
+    streamed = "".join(e.get("delta", "") for e in run.events
+                       if e["stage"] == "stream")
+    # EXACT, not "starts with". The emit is throttled, so whatever arrived
+    # since the last emit is still buffered when the stream ends — the live
+    # view was permanently missing the tail of every answer, and the shorter
+    # the final burst the more of it was lost. Only a full-equality assertion
+    # notices; `in` or a length check passes throughout.
+    assert streamed == "Once upon a time", streamed
+
+
+def test_token_deltas_and_the_final_message_are_not_both_counted(temp_db,
+                                                                 monkeypatch):
+    """With --include-partial-messages the CLI emits token-level deltas AND a
+    complete `assistant` message at the end holding the same text. Consuming
+    both shows every answer twice; consuming neither shows nothing. The
+    fallback exists for a build that emits no deltas, so it has to be
+    conditional rather than removed."""
+    import turnrun
+    seen = {}
+    run = turnrun.create("hello", None)
+    turnrun.bind(run)
+    lines = [
+        '{"type": "stream_event", "event": {"type": "content_block_delta",'
+        ' "delta": {"type": "thinking_delta", "thinking": "hmm"}}}',
+        '{"type": "stream_event", "event": {"type": "content_block_delta",'
+        ' "delta": {"type": "text_delta", "text": "Hello"}}}',
+        '{"type": "stream_event", "event": {"type": "content_block_delta",'
+        ' "delta": {"type": "text_delta", "text": " there"}}}',
+        '{"type": "assistant", "message": {"content": '
+        '[{"type": "text", "text": "Hello there"}]}}',
+        '{"type": "result", "is_error": false, "result": "Hello there"}',
+    ]
+    proc = _fake_cli(seen, lines)
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+    monkeypatch.setattr(providers.subprocess, "Popen",
+                        lambda argv, **kw: proc)
+    try:
+        out = providers._claude_code_complete(
+            {"claude_binary": "claude"}, "s", "u")
+    finally:
+        turnrun.bind(None)
+    assert out == "Hello there"
+    text = "".join(e.get("delta", "") for e in run.events
+                   if e["stage"] == "stream" and e.get("kind") == "text")
+    assert text == "Hello there", "the final message was counted twice"
+    # Reasoning is kept apart from what it decided to say: a draft shown in
+    # the answer pane reads as a conclusion.
+    thinking = "".join(e.get("delta", "") for e in run.events
+                       if e["stage"] == "stream" and e.get("kind") == "thinking")
+    assert thinking == "hmm"
+
+
+def test_the_partial_message_flag_is_actually_requested(temp_db, monkeypatch):
+    """Without it the CLI emits ONE complete message at the end of generation,
+    so the idle bound sees total silence for the whole of a long answer and
+    kills the very run it exists to protect. Measured against the installed
+    CLI: 11 events with the flag, 1 without."""
+    seen = {}
+    proc = _fake_cli(seen, ['{"type": "result", "is_error": false, '
+                            '"result": "ok"}'])
+    monkeypatch.setattr(providers.shutil, "which", lambda b: "/usr/bin/claude")
+
+    def fake_popen(argv, **kw):
+        seen["argv"] = argv
+        return proc
+
+    monkeypatch.setattr(providers.subprocess, "Popen", fake_popen)
+    providers._claude_code_complete({"claude_binary": "claude"}, "s", "u")
+    assert "--include-partial-messages" in seen["argv"]
+    assert "stream-json" in seen["argv"]

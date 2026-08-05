@@ -62,7 +62,12 @@ _DEFAULTS = {
     # Claude Code CLI
     "claude_binary": lambda: "claude",
     "claude_model": lambda: "",          # "" = whatever the CLI defaults to
-    "claude_timeout": lambda: 180.0,
+    # The CEILING, not the wall clock it used to be. Streaming split one
+    # bound into two: `claude_idle_timeout` catches a hang (nothing arriving),
+    # this catches a livelock (output forever). 180 seconds killed real
+    # answers mid-sentence and reported it as a provider fault.
+    "claude_timeout": lambda: 900.0,
+    "claude_idle_timeout": lambda: 120.0,
     # EMBEDDINGS ARE THEIR OWN PROVIDER, and always HTTP.
     #
     # Not a convenience — a necessity. The Claude Code CLI has no embeddings
@@ -258,7 +263,7 @@ def save_config(values):
         if field not in values:
             continue
         value = values[field]
-        if field == "claude_timeout":
+        if field in ("claude_timeout", "claude_idle_timeout"):
             try:
                 clean[field] = max(10.0, min(float(value), 900.0))
             except (TypeError, ValueError):

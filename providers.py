@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -316,6 +317,216 @@ class _Completed:
 MAX_ARGV_ENTRY_BYTES = 131072       # Linux MAX_ARG_STRLEN, 32 pages
 _SYSTEM_PROMPT_BUDGET = MAX_ARGV_ENTRY_BYTES - 8192   # headroom for the rest
 
+# THE OLD TIMEOUT MEASURED THE WRONG THING. A single wall clock cannot tell a
+# model that is thinking hard from one that has hung: at 180 seconds a
+# deliberation round over a large payload was killed mid-answer and surfaced
+# as "the respond stage failed", which reads as a fault and is not one.
+#
+# Two bounds instead, because there are two failures:
+#   IDLE      the CLI has gone SILENT. Nothing is arriving, so nothing is
+#             happening. This is the one that catches a hang, and it can be
+#             short precisely because a working run resets it constantly.
+#   CEILING   a total, for the livelocked case that keeps emitting forever.
+#             Generous, because its only job is to be finite.
+#
+# Streaming is what makes the distinction available at all — with a single
+# blocking read there is no signal between "started" and "finished".
+_DEFAULT_IDLE_TIMEOUT = 120.0
+_STREAM_POLL = 0.5
+
+
+def _stream_text(event, seen):
+    """The text carried by one stream-json event, and what kind it is.
+
+    TWO SHAPES ARRIVE AND ONLY ONE MAY BE COUNTED. With
+    `--include-partial-messages` the CLI emits token-level
+    `content_block_delta`s AND, at the end, a complete `assistant` message
+    holding the same text — so consuming both would show every answer twice.
+    Deltas win when any have been seen; the `assistant` branch is the fallback
+    for a CLI build that does not emit them.
+
+    `thinking_delta` is kept separate rather than merged into the answer. It
+    is the model's reasoning, it is not what it decided to say, and running
+    the two together in one pane is how a draft gets read as a conclusion."""
+    kind = event.get("type")
+    if kind == "stream_event":
+        inner = event.get("event") or {}
+        if inner.get("type") != "content_block_delta":
+            return "", ""
+        delta = inner.get("delta") or {}
+        if delta.get("type") == "text_delta":
+            seen["saw_delta"] = True
+            return delta.get("text") or "", "text"
+        if delta.get("type") == "thinking_delta":
+            seen["saw_delta"] = True
+            return delta.get("thinking") or "", "thinking"
+        return "", ""
+    if kind == "assistant" and not seen["saw_delta"]:
+        return "".join(
+            part.get("text") or ""
+            for part in (event.get("message") or {}).get("content") or []
+            if isinstance(part, dict) and part.get("type") == "text"), "text"
+    return "", ""
+
+
+def _narrate_stream(line, run, seen):
+    """Turn one stream-json event into visible progress, if it carries text.
+
+    Best-effort by construction: an unparseable or unfamiliar event is skipped
+    rather than raised on. The stream is a progress channel, and a provider
+    that dies because it could not classify a notification would be trading
+    the answer for the commentary."""
+    if run is None:
+        return
+    try:
+        event = json.loads(line)
+    except (TypeError, ValueError):
+        return
+    text, kind = _stream_text(event, seen)
+    if not text:
+        return
+    buffer = seen[kind]
+    buffer["text"] += text
+    now = time.monotonic()
+    # Throttled, and the throttle is why this is affordable: the run keeps
+    # every event it is given, so an unthrottled delta channel would trade a
+    # timeout for an unbounded list.
+    pending = len(buffer["text"]) - buffer["sent"]
+    if now - seen["last_emit"] < 0.4 and pending < 400:
+        return
+    seen["last_emit"] = now
+    if seen["events"] >= _MAX_STREAM_EVENTS:
+        # Past the cap the deltas stop and a heartbeat takes over: the user
+        # needs to know it is alive, not to read every token twice.
+        run.emit("stream", kind=kind, chars=len(buffer["text"]),
+                 truncated=True)
+        buffer["sent"] = len(buffer["text"])
+        return
+    run.emit("stream", kind=kind, delta=buffer["text"][buffer["sent"]:],
+             chars=len(buffer["text"]))
+    buffer["sent"] = len(buffer["text"])
+    seen["events"] += 1
+
+
+_MAX_STREAM_EVENTS = 400
+
+
+def _stream_cli(proc, user, run, idle_timeout, ceiling):
+    """Feed the prompt in and read events out, concurrently.
+
+    THE WRITE HAS TO BE CONCURRENT WITH THE READ. `communicate` handled that
+    invisibly; doing it by hand does not get to skip it. A turn payload is
+    routinely over 64 KiB and a pipe buffer is 64 KiB, so writing the whole
+    prompt before reading anything deadlocks the moment the child fills the
+    other direction — the parent blocked on write, the child blocked on
+    write, neither draining the other.
+
+    stderr gets its own drain for the same reason: a chatty child that fills
+    the stderr pipe stops, and it stops without having produced the answer.
+
+    Returns a `_Completed`. Raises with the bound that was hit, named, because
+    "it timed out" sends someone to raise the wrong number."""
+    lines, errs = [], []
+    last_event = [time.monotonic()]
+    seen = {"text": {"text": "", "sent": 0},
+            "thinking": {"text": "", "sent": 0},
+            "saw_delta": False, "last_emit": 0.0, "events": 0}
+
+    def feed():
+        try:
+            proc.stdin.write(user)
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+    def read_events():
+        try:
+            for line in proc.stdout:
+                last_event[0] = time.monotonic()
+                lines.append(line)
+                _narrate_stream(line, run, seen)
+        except (ValueError, OSError):
+            pass
+
+    def read_errors():
+        try:
+            for line in proc.stderr:
+                errs.append(line)
+        except (ValueError, OSError):
+            pass
+
+    threads = [threading.Thread(target=fn, daemon=True)
+               for fn in (feed, read_events, read_errors)]
+    for thread in threads:
+        thread.start()
+    reader = threads[1]
+    started = time.monotonic()
+    while reader.is_alive():
+        reader.join(timeout=_STREAM_POLL)
+        now = time.monotonic()
+        if now - last_event[0] > idle_timeout:
+            proc.kill()
+            raise RuntimeError(
+                f"the Claude Code CLI went silent for {idle_timeout:.0f}s "
+                f"(it had been running {now - started:.0f}s). Raise "
+                "`claude_idle_timeout` in Settings if it is genuinely this "
+                "slow to start.")
+        if now - started > ceiling:
+            proc.kill()
+            raise RuntimeError(
+                f"the Claude Code CLI passed the {ceiling:.0f}s ceiling while "
+                "still producing output. Raise `claude_timeout` in Settings.")
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    for thread in threads:
+        thread.join(timeout=2)
+    # THE THROTTLE HOLDS THE TAIL. Whatever arrived since the last emit is
+    # still in the buffer when the stream ends, so without this the live view
+    # is permanently missing the end of every answer — and the shorter the
+    # final burst, the more of it is lost. Caught by comparing the streamed
+    # text against the returned reply, which is the only assertion that would
+    # have noticed.
+    _flush_stream(run, seen)
+    return _Completed("".join(lines), "".join(errs), proc.returncode)
+
+
+def _flush_stream(run, seen):
+    if run is None:
+        return
+    for kind in ("thinking", "text"):
+        buffer = seen[kind]
+        if len(buffer["text"]) > buffer["sent"]:
+            run.emit("stream", kind=kind,
+                     delta=buffer["text"][buffer["sent"]:],
+                     chars=len(buffer["text"]))
+            buffer["sent"] = len(buffer["text"])
+
+
+def _result_envelope(stdout):
+    """The final `result` event out of a stream-json transcript.
+
+    Read from the END backwards: a transcript holds many objects and only the
+    last one is the answer. Scanning forward would find an `assistant` event
+    and mistake a partial message for the result."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event
+    return None
+
 
 def _claude_code_complete(cfg, system, user):
     binary = str(cfg.get("claude_binary") or "claude").strip() or "claude"
@@ -324,7 +535,16 @@ def _claude_code_complete(cfg, system, user):
         raise RuntimeError(
             f"the Claude Code CLI ({binary!r}) is not on PATH; install it or "
             "point Settings at the right binary")
-    argv = [resolved, "-p", "--output-format", "json",
+    # `stream-json` rather than `json`: the events are the liveness signal the
+    # idle timeout needs, and the assistant's text arrives as it is written
+    # instead of all at once at the end. `--verbose` is required by the CLI
+    # for this format and is not optional.
+    argv = [resolved, "-p", "--output-format", "stream-json", "--verbose",
+            # Token-level deltas. Without this the CLI emits one complete
+            # message at the END of generation, which means the idle bound
+            # sees total silence for the whole of a long answer and kills the
+            # very run it exists to protect.
+            "--include-partial-messages",
             # 2, not 1: headroom so a single stray step cannot end the run
             # outright. With --tools "" there is nothing to step toward, but
             # a ceiling of exactly one leaves no margin for the CLI's own
@@ -335,9 +555,14 @@ def _claude_code_complete(cfg, system, user):
     if model:
         argv += ["--model", model]
     try:
-        timeout = float(cfg.get("claude_timeout") or 180.0)
+        ceiling = float(cfg.get("claude_timeout") or 900.0)
     except (TypeError, ValueError):
-        timeout = 180.0
+        ceiling = 900.0
+    try:
+        idle_timeout = float(cfg.get("claude_idle_timeout")
+                             or _DEFAULT_IDLE_TIMEOUT)
+    except (TypeError, ValueError):
+        idle_timeout = _DEFAULT_IDLE_TIMEOUT
     # The one argv entry that can still grow. Checked before spawning, because
     # the kernel's own answer for this is E2BIG on the whole exec, which names
     # neither which argument was too long nor what to do about it.
@@ -369,14 +594,7 @@ def _claude_code_complete(cfg, system, user):
             raise RuntimeError(f"could not run the Claude Code CLI: {exc}")
         if run is not None:
             run.register_process(proc)
-        try:
-            stdout, stderr = proc.communicate(input=user, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise RuntimeError(
-                f"the Claude Code CLI did not answer within {timeout:.0f}s")
-        done = _Completed(stdout, stderr, proc.returncode)
+        done = _stream_cli(proc, user, run, idle_timeout, ceiling)
     finally:
         if run is not None and proc is not None:
             run.unregister_process(proc)
@@ -390,11 +608,12 @@ def _claude_code_complete(cfg, system, user):
         raise RuntimeError(
             "the Claude Code CLI returned nothing: "
             + ((done.stderr or "").strip()[:300] or f"exit {done.returncode}"))
-    try:
-        envelope = json.loads(done.stdout)
-    except (TypeError, ValueError):
-        raise RuntimeError("the Claude Code CLI returned unparseable JSON: "
-                           + done.stdout[:300])
+    envelope = _result_envelope(done.stdout)
+    if envelope is None:
+        raise RuntimeError(
+            "the Claude Code CLI produced no result event: "
+            + ((done.stderr or "").strip()[:200]
+               or done.stdout.strip()[-300:] or f"exit {done.returncode}"))
     # `is_error` is the CLI's own verdict and it is NOT the exit code: a "Not
     # logged in" answer comes back as subtype "success" with is_error true and
     # the reason in `result`. Surfacing that text is the difference between

@@ -138,11 +138,44 @@ function reasoningLine(ev) {
     }
     return text;
   }
+  if (ev.stage === 'stream') return null;   // rendered live, not as a step
+  if (ev.stage === 'edit') {
+    return 'edited ' + ev.path + (ev.created ? ' (new file)' : '')
+      + '\n   re-chunked into ' + ev.rechunked + ' pieces';
+  }
   if (ev.stage === 'commit') return 'committing — past the point of no halt';
   if (ev.stage === 'halted') return 'halted; nothing was committed';
   if (ev.stage === 'failed') return 'failed: ' + ev.error;
   if (ev.stage === 'start' || ev.stage === 'done') return null;
   return ev.stage;
+}
+
+function reasoningStep(ev, line) {
+  // EVERY STAGE CARRIES MORE THAN ITS HEADLINE, and dumping all of it made
+  // the panel a wall nobody read — the gists behind a recall, the query
+  // behind a search, the task behind a subagent. First line is the summary,
+  // the rest opens on click, so scanning and reading are different acts.
+  const parts = line.split('\n');
+  const summary = parts[0];
+  const detail = parts.slice(1).join('\n');
+  const row = el('<div class="reasoning-step"></div>');
+  const head = el('<div class="step-head"></div>');
+  head.textContent = '[' + ev.t.toFixed(1) + 's] ' + summary;
+  row.appendChild(head);
+  if (!detail) return row;
+  head.classList.add('expandable');
+  head.textContent += '  ▸';
+  const body = el('<div class="step-detail"></div>');
+  body.textContent = detail;
+  body.style.display = 'none';
+  head.addEventListener('click', function () {
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    head.textContent = '[' + ev.t.toFixed(1) + 's] ' + summary
+      + (open ? '  ▸' : '  ▾');
+  });
+  row.appendChild(body);
+  return row;
 }
 
 function makeReasoningPanel() {
@@ -170,6 +203,15 @@ async function sendMessage(text, isRetry) {
   addMsg('user', isRetry ? text + '  (retry)' : text);
 
   const pending = addMsg('meta', 'thinking…');
+  const live = el('<div class="live"></div>');
+  live.style.display = 'none';
+  live.think = el('<div class="live-stream thinking"></div>');
+  live.answer = el('<div class="live-stream"></div>');
+  live.think.style.display = 'none';
+  live.answer.style.display = 'none';
+  live.appendChild(live.think);
+  live.appendChild(live.answer);
+  pending.appendChild(live);
   const panel = makeReasoningPanel();
   pending.appendChild(panel.wrap);
   let runId = null;
@@ -231,12 +273,27 @@ async function sendMessage(text, isRetry) {
           resolve();
           return;
         }
+        // The model's own words, as they are written. Before streaming, a
+        // turn was a spinner for as long as the answer took and there was no
+        // way to tell a slow answer from a dead one — which is the same
+        // ambiguity the idle timeout fixes on the server, seen from the
+        // outside.
+        if (ev.stage === 'stream') {
+          // Reasoning is shown SEPARATELY from the answer. It is what the
+          // model was working through, not what it decided to say, and the
+          // two in one pane read as a single confident statement.
+          const target = ev.kind === 'thinking' ? live.think : live.answer;
+          if (ev.truncated) { target.classList.add('capped'); return; }
+          target.textContent += ev.delta || '';
+          target.style.display = 'block';
+          live.style.display = 'block';
+          target.scrollTop = target.scrollHeight;
+          return;
+        }
         const line = reasoningLine(ev);
         if (line === null) return;
         steps += 1;
-        const row = el('<div class="reasoning-step"></div>');
-        row.textContent = '[' + ev.t.toFixed(1) + 's] ' + line;
-        panel.body.appendChild(row);
+        panel.body.appendChild(reasoningStep(ev, line));
         // The live view is the point: show the newest step in the collapsed
         // state too, so a running turn is legible without opening anything.
         panel.toggle.textContent =

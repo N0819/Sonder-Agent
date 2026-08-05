@@ -99,3 +99,18 @@ button.danger { background: #3b2530; color: #f7768e; }
 .card.retired { border-left: 3px solid #565f89; opacity: .85; }
 .card.retired .items { margin: .4rem 0 0 1rem; font-size: .85rem;
                        color: #9aa5b1; }
+
+/* The model's words as they arrive, and one stage at a time. */
+.live-stream { margin-top: .45rem; padding: .5rem .7rem; background: #1b1f25;
+  border-left: 2px solid #24405e; border-radius: .3rem; text-align: left;
+  font-size: .85rem; color: #b9c2cf; white-space: pre-wrap;
+  max-height: 18rem; overflow-y: auto; }
+.live-stream.capped::after { content: " …(still writing; the live view stops here)";
+  color: #77808c; font-size: .78rem; }
+.live-stream.thinking { color: #77808c; font-style: italic;
+  border-left-color: #3a3f48; max-height: 10rem; }
+.reasoning-step .step-head { cursor: default; }
+.reasoning-step .step-head.expandable { cursor: pointer; }
+.reasoning-step .step-head.expandable:hover { color: #b9c2cf; }
+.reasoning-step .step-detail { color: #77808c; padding: .15rem 0 .3rem .9rem;
+  border-left: 1px solid #2a2e35; margin: .1rem 0 .2rem .2rem; }
