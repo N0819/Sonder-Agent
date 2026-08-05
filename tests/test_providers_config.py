@@ -5,6 +5,7 @@
 # silently; a field nothing reads defeats even the check built to catch an
 # empty one.
 
+import http.client
 import json
 import os
 
@@ -721,3 +722,34 @@ def test_generation_does_not_inherit_the_lookup_timeout():
     because it is a subprocess and never touches urllib."""
     assert providers.CHAT_TIMEOUT > providers.REQUEST_TIMEOUT
     assert providers.CHAT_TIMEOUT >= 300
+
+
+@pytest.mark.parametrize("failure", [
+    TimeoutError("The read operation timed out"),
+    http.client.RemoteDisconnected(
+        "Remote end closed connection without response"),
+    ConnectionResetError("Connection reset by peer"),
+    providers.urllib.error.URLError("Name or service not known"),
+    http.client.BadStatusLine("''"),
+])
+def test_every_transport_failure_is_retried_and_named(failure, monkeypatch):
+    """CAUGHT THE MEMBER, NOT THE FAMILY, AND WAS FORGOTTEN TWICE. The clause
+    handled `URLError` only, but urllib wraps what `request()` raises and not
+    what `getresponse()` does — so a read timeout arrived as a bare
+    `TimeoutError` and a dropped connection as `http.client.RemoteDisconnected`.
+    Both escaped the bounded backoff unretried and surfaced as raw library
+    strings naming no provider and no stage. Enumerating the classes as each
+    one bites is the guard that must be remembered; this asserts the family."""
+    tries = []
+
+    def fail(req, timeout=None):
+        tries.append(timeout)
+        raise failure
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fail)
+    with pytest.raises(RuntimeError) as caught:
+        providers._post_with_retry(object(), attempts=2)
+
+    assert len(tries) == 2, f"{type(failure).__name__} was not retried"
+    assert "chat provider" in str(caught.value), \
+        f"{type(failure).__name__} leaked a raw library string"

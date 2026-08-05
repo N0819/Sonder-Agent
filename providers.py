@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.request
 import zlib
@@ -289,8 +290,26 @@ def _post_with_retry(req, attempts=_RETRY_ATTEMPTS):
                 wait = delay
             time.sleep(min(wait, 30.0))
             delay *= 2
-        except urllib.error.URLError as exc:
-            last = RuntimeError(f"chat provider unreachable: {exc.reason}")
+        # THE FAMILY, NOT THE MEMBER THAT BIT LAST. This clause caught only
+        # `URLError`, and the transport kept producing failures that are not
+        # one: a read timeout is a bare `TimeoutError`, and a connection
+        # dropped mid-response is `http.client.RemoteDisconnected`, because
+        # urllib wraps what `request()` raises and not what `getresponse()`
+        # does. Each escaped the backoff, unretried, and reached the turn as a
+        # raw library string naming no provider and no stage.
+        #
+        # Enumerating them one at a time is a guard that must be remembered,
+        # and it was forgotten twice. Everything the transport can raise is
+        # `OSError` or `http.client.HTTPException`; the two cases that need
+        # their own handling — a real HTTP status, and a timeout — are caught
+        # above, so what reaches here is transient by construction.
+        except (OSError, http.client.HTTPException) as exc:
+            reason = getattr(exc, "reason", None) or exc
+            last = RuntimeError(
+                f"chat provider connection failed: {reason}. The connection "
+                "closed before a reply arrived — usually an unreachable host, "
+                "a rejected request (wrong model name or a payload the "
+                "provider will not accept), or a proxy limit.")
             if attempt == attempts - 1:
                 raise last from exc
             time.sleep(delay)
