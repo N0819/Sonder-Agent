@@ -432,7 +432,12 @@ def spawn_cohort(specs, *, turn_idx, session_id=None, context=""):
                            context=context, assignment=assignments[n],
                            cohort=cohort)
 
-    threads = [threading.Thread(target=work, args=(n,), daemon=True)
+    # `turnrun.inherit` HERE, on the parent thread, is what makes the cohort
+    # visible at all: `current()` is thread-local, so without it every child
+    # thread runs unobserved and each subagent's own emits — the ones written
+    # to close the gap in the reasoning panel — go nowhere.
+    threads = [threading.Thread(target=turnrun.inherit(work), args=(n,),
+                                daemon=True)
                for n in range(len(specs))]
     for thread in threads:
         thread.start()

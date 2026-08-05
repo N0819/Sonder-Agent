@@ -593,3 +593,42 @@ def test_the_child_reports_every_turn_so_silence_means_stuck(temp_db):
     src = inspect.getsource(runner)
     assert '"type": "progress"' in src, "the heartbeat is what makes idle mean stuck"
     assert '"experiments"' in src, "it must carry what the turn did, not that it happened"
+
+
+def test_a_subagent_on_its_own_thread_still_reaches_the_turn(temp_db,
+                                                             monkeypatch):
+    """Every subagent event reached nobody. `turnrun.current()` is
+    thread-local and `spawn_cohort` gives each subagent its own thread, so
+    the emits written to close the subagent-shaped hole in the reasoning
+    panel ran with `run` None and did nothing — no error, no warning, an
+    empty panel and a turn that looked hung for ten minutes. The emit sites
+    were correct; the thread under them had no turn."""
+    import threading
+
+    import turnrun
+
+    run = turnrun.create("watching a cohort", None)
+    turnrun.bind(run)
+    threads_seen = []
+
+    def fake_spawn(kind, task, **kw):
+        got = turnrun.current()
+        threads_seen.append(threading.current_thread().name)
+        if got is not None:
+            got.emit("subagent", state="started", kind=kind, task=task)
+        return {"ok": True, "report": {"summary": task}}
+
+    monkeypatch.setattr(subagents, "spawn", fake_spawn)
+    try:
+        reports, _warnings = subagents.spawn_cohort(
+            [{"kind": "scout", "task": "one"},
+             {"kind": "scout", "task": "two"}], turn_idx=1)
+    finally:
+        turnrun.bind(None)
+
+    assert len(reports) == 2
+    # The point of the fixture: they really did run off the turn's thread.
+    assert threading.current_thread().name not in threads_seen
+    started = [e for e in run.events
+               if e.get("stage") == "subagent" and e.get("state") == "started"]
+    assert len(started) == 2, "a cohort the panel cannot see is not observable"

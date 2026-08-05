@@ -281,6 +281,31 @@ def current():
     return getattr(_current, "run", None)
 
 
+def inherit(target):
+    """Wrap `target` so a thread started from HERE carries this run.
+
+    "The thread IS the turn" holds only while the turn owns one thread. The
+    moment a stage fans out, every new thread starts unobserved, and an emit
+    on an unobserved thread is not an error and not a warning — it is a
+    silent no-op behind `if run is not None`. `spawn_cohort` runs each
+    subagent on its own thread, so from the day the cohort became concurrent
+    EVERY subagent event — started, working, reported — reached nobody. Both
+    emit sites were written, reviewed and correct; the panel stayed empty
+    because the thread underneath them had no run to emit to. A failure of
+    this shape leaves no trace anywhere to find it by.
+
+    Called on the PARENT thread — it reads `current()` at wrap time, not at
+    call time — so the wrapping must happen where the thread is created, not
+    inside the body it will run."""
+    run = current()
+
+    def carried(*args, **kwargs):
+        if run is not None:
+            bind(run)
+        return target(*args, **kwargs)
+    return carried
+
+
 def create(text, session_id):
     run = TurnRun(uuid.uuid4().hex[:16], text, session_id)
     with _registry_lock:
