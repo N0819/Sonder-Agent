@@ -484,3 +484,47 @@ def test_discarding_a_memory_still_requires_having_been_shown_it(temp_db):
 
     assert kept == []
     assert any("ungrounded" in w for w in warnings)
+
+
+def test_a_parse_failure_keeps_the_words_that_explain_it(temp_db, monkeypatch):
+    """`parse_model_json(chat_complete(...))` threw the model's actual output
+    away at the moment it became interesting, so every "respond stage returned
+    unparseable output" since turn 79 has been unfalsifiable — the thing that
+    would say whether it was truncation, a fence, a refusal or a provider
+    error was already gone. Observed again at turn 117: a 496,743-character
+    payload over four rounds, and nothing anywhere recording what came back.
+
+    Both ends, because the two diagnoses live at opposite ones: a refusal or a
+    prose preamble shows at the head, truncation at max_tokens shows as a
+    sentence that simply stops at the tail."""
+    import providers
+
+    truncated = 'Here is the answer: {"reply": "' + "x" * 900
+    providers.set_chat_stub(lambda system, user, **kw: truncated)
+    try:
+        out = pipeline.run_turn("what happened?")
+    finally:
+        providers.set_chat_stub(None)
+
+    bad = out["trace"]["payload_cost"]["unparseable"]
+    assert bad["chars"] == len(truncated)
+    assert bad["head"].startswith("Here is the answer:")
+    assert bad["tail"].endswith("x")
+    assert bad["sent_chars"] > 0
+    # And the operator is told without opening the trace, because the next
+    # move differs completely between max_tokens and a provider error page.
+    assert any("unparseable output:" in w and "chars back on a" in w
+               for w in out["warnings"]), out["warnings"]
+
+
+def test_a_turn_that_parses_records_no_failure_sample(temp_db):
+    """The diagnosis must not become a field that is always there — a key
+    present on every turn is one nobody reads on the turn that matters."""
+    import providers
+
+    providers.set_chat_stub(lambda system, user, **kw: '{"reply": "fine"}')
+    try:
+        out = pipeline.run_turn("hello")
+    finally:
+        providers.set_chat_stub(None)
+    assert "unparseable" not in out["trace"]["payload_cost"]

@@ -263,8 +263,29 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
         # second time: the instrument must not become a cost of its own.
         sent = json.dumps(body, ensure_ascii=False)
         cost["rounds"].append(len(sent))
-        out = parse_model_json(chat_complete(system, sent))
+        # THE RAW OUTPUT DIES INSIDE THIS EXPRESSION, and it is the only
+        # evidence of why a turn failed. `parse_model_json(chat_complete(...))`
+        # threw the model's actual words away at the moment they became
+        # interesting: every "respond stage returned unparseable output" since
+        # turn 79 has been unfalsifiable, because the thing that would say
+        # whether it was truncation, a fence, a refusal or a provider error was
+        # already gone. Observed again at turn 117 — a 496,743-character
+        # payload over four rounds, and nothing anywhere recording what came
+        # back.
+        raw = chat_complete(system, sent)
+        out = parse_model_json(raw)
         if out is None:
+            # Both ends, because the two diagnoses live at opposite ones: a
+            # refusal or a prose preamble shows at the head, and truncation at
+            # max_tokens shows as a sentence that simply stops at the tail.
+            text = " ".join(str(raw or "").split())
+            cost["unparseable"] = {
+                "chars": len(str(raw or "")),
+                "head": text[:400],
+                "tail": text[-400:] if len(text) > 800 else "",
+                "round": round_no,
+                "sent_chars": len(sent),
+            }
             return None, deliberation, delivered, cost
         more = out.get("need_more")
         if not isinstance(more, dict) or round_no == DELIBERATION_MAX_ROUNDS:
@@ -593,7 +614,22 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             if deliberation:
                 trace["deliberation"] = deliberation
             if out is None:
-                warnings.append("respond stage returned unparseable output")
+                # SAY WHICH FAILURE IT WAS. "Unparseable output" names the
+                # symptom and nothing else, and the operator's next move
+                # differs completely between a payload that hit max_tokens and
+                # a provider that returned an error page.
+                bad = (cost or {}).get("unparseable") or {}
+                if bad:
+                    warnings.append(
+                        "respond stage returned unparseable output: "
+                        f"{bad['chars']:,} chars back on a "
+                        f"{bad['sent_chars']:,}-char payload — begins "
+                        f"{bad['head'][:120]!r}"
+                        + (f", ends {bad['tail'][-120:]!r}"
+                           if bad.get("tail") else ""))
+                else:
+                    warnings.append(
+                        "respond stage returned unparseable output")
         except turnrun.TurnHalted:
             raise
         except Exception as exc:
