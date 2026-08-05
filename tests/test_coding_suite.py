@@ -829,3 +829,69 @@ def test_a_budget_smaller_than_the_head_still_leaves_a_tail(temp_db):
     fitted = coding._fit_observation(text, 200)
     assert len(fitted) <= 200
     assert fitted.endswith("TAIL")
+
+
+def test_an_experiment_can_run_inside_the_project_it_is_testing(temp_db):
+    """A project is not a loose pile of files. An unpacked repository sits at
+    `<name>/<name>/`, and its own code resolves paths against the process
+    directory — the Engine mounts `StaticFiles(directory="static")` at import
+    time — so a suite invoked from the workspace root failed on every module
+    with `Directory 'static' does not exist` no matter how completely the
+    files were delivered. Measured: 24 modules, 226 tests. The only way to say
+    "run in that directory" was `sh -c "cd X && ..."`, which makes the command
+    `sh` and so loses the pytest provisioning keyed on it — two workarounds
+    cancelling out, and four turns spent between them."""
+    files = {"proj/static/index.html": "<!doctype html>",
+             "proj/app.py": "import os\nprint('STATIC', os.path.isdir('static'))"}
+    outside = sandbox.run(files, [sys.executable, "-s", "proj/app.py"])
+    assert "STATIC False" in outside["stdout"]
+    inside = sandbox.run(files, [sys.executable, "-s", "app.py"], cwd="proj")
+    assert "STATIC True" in inside["stdout"]
+
+
+def test_a_run_directory_outside_the_workspace_is_refused(temp_db):
+    """A generated path is untrusted input here as everywhere else — and a cwd
+    that quietly fell back to the root would reproduce the exact failure the
+    argument exists to end, with the argument set."""
+    out = sandbox.run({"main.py": "print('hi')"},
+                      [sys.executable, "-s", "main.py"], cwd="../../etc")
+    assert out["ok"] is False and "refused to run outside" in out["stderr"]
+    missing = sandbox.run({"main.py": "print('hi')"},
+                          [sys.executable, "-s", "main.py"], cwd="nope")
+    assert missing["ok"] is False and "no such directory" in missing["stderr"]
+
+
+def test_a_file_can_be_read_back_without_predicting_its_contents(temp_db):
+    """Deriving the collected list from the prediction is what stops a file
+    predicate being judged against a file nobody read back — but it also made
+    "give me that file" inexpressible without inventing a prediction about a
+    number not yet known. A measurement run wrote its counts to a ladder file
+    and had no way to ask for it: four turns of writing predicates about files
+    that were never returned, each recorded as "the run left no X to check"."""
+    hyp = research.open_hypothesis("what does the run count?", 1)
+    out = coding.run_experiment(
+        hyp["id"],
+        source="open('counts.txt','w').write('FAILED=60 ERRORS=9')\nprint('ok')",
+        expect={"exit_zero": True}, collect=["counts.txt"], turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED
+    assert out["result"]["files_after"]["counts.txt"] == "FAILED=60 ERRORS=9"
+
+
+def test_source_overwriting_your_own_file_is_reported(temp_db):
+    """`source` always lands in main.py and silently overwrote whatever the
+    caller put there. A caller who named its program `probe.py` in `files` and
+    passed the real body as `source` got both — a stub at probe.py and the
+    body at main.py — and the command it wrote ran the stub. Observed: a probe
+    whose entire output was `NameError: PLACEHOLDER_REPLACED_BY_SOURCE`."""
+    hyp = research.open_hypothesis("does the collision surface?", 1)
+    out = coding.run_experiment(
+        hyp["id"], source="print('the real body')",
+        files={"main.py": "PLACEHOLDER"},
+        expect={"output_equals": "the real body"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED
+    assert out["shadowed"] == "main.py"
+    # Not resolved, reported: guessing which one was meant is how the wrong
+    # file wins quietly.
+    clean = coding.run_experiment(
+        hyp["id"], source="print('x')", expect={"exit_zero": True}, turn_idx=1)
+    assert clean["shadowed"] == ""

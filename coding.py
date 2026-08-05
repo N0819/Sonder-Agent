@@ -371,7 +371,8 @@ def judge(result, expect):
 
 
 def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
-                   files=None, command=None, timeout=None, note=""):
+                   files=None, command=None, timeout=None, note="",
+                   cwd="", collect=()):
     """One experiment: predict, run, judge, record as evidence.
 
     Returns {outcome, why, result, evidence, repeated}. The evidence row is an
@@ -406,7 +407,18 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     # A named command needs no source. Only the bare `python3 main.py` default
     # does, and that is the one path that now insists on it.
     payload = dict(files or {})
+    shadowed = ""
     if str(source).strip():
+        # `source` ALWAYS lands in main.py, and silently overwrote whatever
+        # the caller had put there. Worse in the other direction: a caller who
+        # named its program `probe.py` in `files` and passed the real body as
+        # `source` got both — a stub at probe.py and the body at main.py — and
+        # the command it wrote ran the stub. Observed: a probe whose entire
+        # output was `NameError: PLACEHOLDER_REPLACED_BY_SOURCE`. Silent
+        # either way, so it is reported rather than resolved: guessing which
+        # one was meant is how the wrong file wins quietly.
+        if payload.get("main.py") not in (None, source):
+            shadowed = "main.py"
         payload["main.py"] = source
     elif command is None:
         return {"outcome": OUTCOME_INCONCLUSIVE,
@@ -415,9 +427,18 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                 "result": None, "evidence": None, "repeated": False}
     if command is None:
         command = [sys.executable, "-s", "main.py"]
+    # `collect` UNION the predicted paths, never instead of them. Deriving
+    # the list from the prediction is what stops a file predicate being judged
+    # against a file nobody read back — but it also made "give me that file"
+    # inexpressible without inventing a prediction about contents not yet
+    # known. A measurement run wrote its counts to a ladder file and had no way
+    # to ask for it: four turns of writing predicates about files that were
+    # never returned, recorded as "the run left no X to check".
+    want = sorted(set(_expected_paths(expect))
+                  | {str(p) for p in (collect or ())})
     result = sandbox.run(payload, command,
                          timeout=timeout or sandbox.DEFAULT_TIMEOUT,
-                         collect=_expected_paths(expect))
+                         collect=want, cwd=cwd)
 
     outcome, why = judge(result, expect)
     digest = _digest(hypothesis_id, source, command, expect, payload)
@@ -470,7 +491,8 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                                  research.EXCERPT_CHARS),
         stance=stance, turn_idx=turn_idx)
     return {"outcome": outcome, "why": why, "result": result,
-            "evidence": evidence, "repeated": repeated}
+            "evidence": evidence, "repeated": repeated,
+            "shadowed": shadowed}
 
 
 def observed_failing(hypothesis_id):

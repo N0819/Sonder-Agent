@@ -107,7 +107,9 @@ Return ONLY a JSON object:
                   "source": "the python to run — OR omit it and give `command`",
                   "command": ["python3", "-m", "pytest", "tests/", "-q"],
                   "expect": {{"exit_zero": true, "stdout_has": "..."}},
-                  "files": {{"lib.py": "..."}}, "timeout": 120, "note": "..."}}],
+                  "files": {{"lib.py": "..."}}, "timeout": 120, "note": "...",
+                  "cwd": "the directory to run IN, relative to the workspace",
+                  "collect": ["counts.txt"]}}],
   "propose_fix": {{"hypothesis_id": 1, "description": "..."}},
   "edit_files": [{{"path": "src/thing.py", "why": "...", "hypothesis_id": 1,
                   "replace": [{{"old": "exact text now in the file",
@@ -198,6 +200,24 @@ carry real risk of being wrong:
 The file predicates read files THE RUN LEFT BEHIND, so "the patch applied and
 the file now reads X" is checkable directly instead of via a print statement.
 A prediction about a file the run never wrote is inconclusive, not refuted.
+
+`collect` asks for a file back WITHOUT predicting its contents — the case
+where the number you want is the thing you do not yet know. Use it whenever a
+run writes its answer to a file: a count, a roster, a junit report. Predicted
+paths are collected anyway, so `collect` is for the files you want to READ.
+
+`cwd` runs the command inside a directory of the workspace. Use it whenever
+the thing under test is a PROJECT rather than a script: an unpacked repository
+sits at `<name>/<name>/`, and code that resolves a path against the process
+directory — a static mount, a fixture folder, a relative open — fails from
+anywhere else no matter how complete the files are. Set `cwd` to the project
+root and invoke the tool plainly; do not write `sh -c "cd X && ..."`, which
+makes the command `sh` and loses the interpreter's own setup.
+
+`source` ALWAYS runs as `main.py`. If you want the program in a file of your
+own naming, put it in `files` and name that file in `command` — passing both
+gives you a stub at your path and the real body at main.py, and the command
+runs the stub.
 
 CHANGING FILES. `edit_files` writes back to the workspace — the only verb
 here that outlives the turn. Two modes, and PREFER THE FIRST:

@@ -755,7 +755,10 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                 hyp["id"], source=source, expect=spec.get("expect"),
                 turn_idx=turn_idx, files=files,
                 command=command, timeout=spec.get("timeout"),
-                note=str(spec.get("note") or "")[:200])
+                note=str(spec.get("note") or "")[:200],
+                cwd=str(spec.get("cwd") or ""),
+                collect=[str(p) for p in (spec.get("collect") or [])
+                         if isinstance(spec.get("collect"), list)])
         except Exception as exc:
             run.emit("experiment", state="the harness itself failed",
                      hypothesis=question[:200], detail=str(exc)[:200])
@@ -778,6 +781,13 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                             "outcome": outcome["outcome"],
                             "why": outcome["why"][:200],
                             "repeated": outcome["repeated"]})
+        if outcome.get("shadowed"):
+            # A warning is the system WORKING: the run happened, and this says
+            # the program that ran was not the one the caller thought it wrote.
+            warnings.append(
+                f"`source` overwrote your own {outcome['shadowed']} — source "
+                "always lands in main.py, so name the program you want run "
+                "either in `source` or in `files`, never both")
         if outcome["repeated"]:
             warnings.append(
                 "the same experiment disagreed with its earlier run — that is "

@@ -227,7 +227,7 @@ MAX_COLLECT_BYTES = 200_000
 
 
 def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
-        import_paths=(), collect=()):
+        import_paths=(), collect=(), cwd=""):
     """Write `files` into a throwaway workspace, run `command`, report.
 
     `files` is {relative_path: contents}. `command` is an argv list. Returns a
@@ -244,6 +244,18 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                     findings and a caller that conflates them will keep
                     re-running the loop
         files_after {path: contents} for each path named in `collect`
+
+    `cwd` IS A SUBDIRECTORY TO RUN IN, and it exists because a project is
+    not a loose pile of files. An unpacked repository sits at
+    `<name>/<name>/`, and its own code resolves paths against the process
+    cwd — the Engine's `app.py` mounts `StaticFiles(directory="static")` at
+    import time — so a suite invoked from the workspace root fails on every
+    module with `Directory 'static' does not exist` no matter how completely
+    the files were delivered. Measured: 24 modules, 226 tests. The only way
+    to say "run in that directory" was `sh -c "cd X && ..."`, which changes
+    the argv to `sh` and so loses the pytest provisioning keyed on it — two
+    workarounds cancelling out, and the assistant spent four turns there.
+    Refused if it escapes the workspace, like every other path here.
 
     `collect` IS THE WHOLE REASON A RUN CAN BE ASKED ABOUT ITS EFFECTS. The
     workspace is destroyed in the `finally` below, so before this existed the
@@ -332,10 +344,26 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                         "stderr": f"could not write {relative!r}: {exc}",
                         "truncated": False, "seconds": 0.0,
                         "timed_out": False, "harness": harness}
+        # Resolved AFTER the files are written, so naming a directory the run
+        # itself creates works, and refused rather than silently ignored: a
+        # cwd that quietly falls back to the root reproduces the exact failure
+        # this argument exists to end, with the argument set.
+        run_dir = os.path.normpath(os.path.join(workspace, str(cwd or "")))
+        if not (run_dir == workspace or run_dir.startswith(workspace + os.sep)):
+            return {"ok": False, "exit_code": None, "stdout": "",
+                    "stderr": f"refused to run outside the workspace: "
+                              f"{cwd!r}",
+                    "truncated": False, "seconds": 0.0, "timed_out": False,
+                    "harness": harness}
+        if not os.path.isdir(run_dir):
+            return {"ok": False, "exit_code": None, "stdout": "",
+                    "stderr": f"no such directory in the workspace: {cwd!r}",
+                    "truncated": False, "seconds": 0.0, "timed_out": False,
+                    "harness": harness}
         started = time.perf_counter()
         try:
             proc = subprocess.Popen(
-                command, cwd=workspace,
+                command, cwd=run_dir,
                 env=_clean_env(workspace, import_paths),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -393,7 +421,9 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
         err, cut_err = _tail(b"".join(err_chunks))
         # Read back BEFORE the rmtree below, and after the tree is dead, so a
         # surviving writer cannot change what is reported.
-        after = _collect(workspace, collect)
+        # Relative to where the program RAN, because that is where a relative
+        # write lands. Identical to the old behaviour when `cwd` is unset.
+        after = _collect(run_dir, collect, workspace)
         if timed_out:
             return {"ok": False, "exit_code": None, "stdout": out,
                     "stderr": (err
@@ -410,7 +440,7 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def _collect(workspace, paths):
+def _collect(run_dir, paths, workspace=None):
     """Read named files out of the workspace before it is destroyed.
 
     Every failure to read is silent ABSENCE rather than an exception or an
@@ -420,9 +450,10 @@ def _collect(workspace, paths):
     uses — a path in a prediction is untrusted input exactly like a path in
     `files`."""
     out = {}
+    bound = workspace if workspace is not None else run_dir
     for relative in (paths or ()):
-        target = os.path.normpath(os.path.join(workspace, str(relative)))
-        if not target.startswith(workspace + os.sep):
+        target = os.path.normpath(os.path.join(run_dir, str(relative)))
+        if not target.startswith(bound + os.sep):
             continue
         try:
             with open(target, "r", encoding="utf-8", errors="replace") as fh:
