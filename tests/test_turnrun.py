@@ -281,3 +281,54 @@ def test_no_cursor_and_a_cursor_of_zero_are_different(temp_db):
     # cosmetic, a skipped one loses the answer.
     assert app.resume_cursor("nonsense", None) == 0
     assert app.resume_cursor("-5", None) == 0
+
+
+def test_a_long_quiet_stage_keeps_the_connection_alive(temp_db, monkeypatch):
+    """A LONG STAGE IS NOT AN IDLE CONNECTION, but to everything between the
+    server and the browser it looks exactly like one. A deep subagent holds a
+    turn for minutes without emitting, and a stream carrying no bytes gets
+    reaped — by a proxy, a NAT table, or the browser. The turn then runs on
+    while the page believes it has been cut off.
+
+    Observed live on a real turn: a deep subagent 10 minutes in, the browser
+    holding an ESTABLISHED connection, and the page still showing "connection
+    lost". The keepalive is what stops the drop; the `onopen` handler is what
+    stops the banner outliving it."""
+    import threading
+    import time
+    monkeypatch.setattr(turnrun, "_HEARTBEAT_SECONDS", 0.5)
+    run = turnrun.create("slow turn", None)
+
+    def worker():
+        # Wrapped, because this exact thread raised NameError while writing
+        # this test and the failure was invisible: the run simply never
+        # finished and `follow` waited out its timeout. A background thread
+        # that dies silently looks identical to one that is being slow.
+        try:
+            run.emit("recall", returned=1)
+            time.sleep(2.0)           # the quiet stage
+            run.finish("done", result={"reply": "ok"})
+        except BaseException as exc:  # pragma: no cover - guard, not logic
+            run.finish("failed", error=repr(exc))
+
+    threading.Thread(target=worker, daemon=True).start()
+    frames = list(turnrun.sse(run))
+    pings = [f for f in frames if f.startswith(": ")]
+    assert pings, "a silent stage sent nothing and would be reaped"
+    # A comment frame carries no id and no data, so it cannot be mistaken for
+    # a step that happened — the trail must never gain a stage nobody ran.
+    assert all("data:" not in p and "id:" not in p for p in pings)
+    assert [f for f in frames if f.startswith("id: ")], "events still flow"
+
+
+def test_a_finished_run_is_not_kept_alive_forever(temp_db, monkeypatch):
+    """The heartbeat fires only while the run is RUNNING. A stream that
+    pinged after `end` would never close, and the page would hold a
+    connection to a turn that finished."""
+    monkeypatch.setattr(turnrun, "_HEARTBEAT_SECONDS", 0.2)
+    run = turnrun.create("quick", None)
+    run.emit("recall", returned=1)
+    run.finish("done", result={"reply": "ok"})
+    frames = list(turnrun.sse(run))          # must terminate on its own
+    assert not [f for f in frames if f.startswith(": ")]
+    assert '"stage": "end"' in frames[-1]

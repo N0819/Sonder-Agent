@@ -34,6 +34,10 @@ _MAX_RETAINED = 32
 # because the run on this side never stopped: the gap is a UI artefact and
 # should not read as a failure.
 _RECONNECT_MS = 750
+# How long a stream may go silent before it sends a keepalive. Well under the
+# 60s that proxies and NAT tables commonly reap at, and far under the minutes
+# a deep subagent can hold a turn without emitting.
+_HEARTBEAT_SECONDS = 15.0
 
 _runs = {}
 _order = []
@@ -145,7 +149,7 @@ class TurnRun:
             self._cond.notify_all()
             return "halting"
 
-    def follow(self, timeout=600.0, since=0):
+    def follow(self, timeout=600.0, since=0, heartbeat=None):
         """Yield events from `since`, then live ones until the run ends.
 
         Replays from index 0 by default so a client that connects a moment
@@ -164,13 +168,35 @@ class TurnRun:
         turned out, not left waiting on a stream with nothing more to say."""
         sent = max(0, int(since or 0))
         deadline = time.time() + timeout
+        quiet_since = time.time()
         while True:
             with self._cond:
                 while sent >= len(self.events) and self.status == "running":
                     if not self._cond.wait(timeout=1.0):
                         if time.time() > deadline:
                             return
+                        # A LONG STAGE IS NOT AN IDLE CONNECTION, but to
+                        # everything between here and the browser it looks
+                        # exactly like one. A deep subagent can hold a turn
+                        # for minutes without emitting, and a stream with no
+                        # bytes on it gets reaped — by a proxy, by a NAT
+                        # table, by the browser itself. The turn then keeps
+                        # running while the page believes it has been cut off.
+                        #
+                        # `None` is a KEEPALIVE TICK, translated by `sse` into
+                        # a comment frame the browser ignores. Opt-in, so
+                        # every existing caller of `follow` still sees nothing
+                        # but events.
+                        if (heartbeat and self.status == "running"
+                                and time.time() - quiet_since >= heartbeat):
+                            quiet_since = time.time()
+                            self._cond.release()
+                            try:
+                                yield None
+                            finally:
+                                self._cond.acquire()
                 batch = self.events[sent:]
+                quiet_since = time.time()
                 sent += len(batch)
                 finished = self.status != "running"
             for event in batch:
@@ -255,6 +281,12 @@ def sse(run, since=0):
     feature is that the gap should be short enough not to look like a
     failure."""
     yield f"retry: {_RECONNECT_MS}\n\n"
-    for event in run.follow(since=since):
+    for event in run.follow(since=since, heartbeat=_HEARTBEAT_SECONDS):
+        if event is None:
+            # A comment frame: bytes on the wire, no `onmessage`, no id. It
+            # keeps the connection from being reaped during a long stage
+            # without inventing a step that did not happen.
+            yield ": keep-alive\n\n"
+            continue
         yield (f"id: {event.get('i', 0)}\n"
                + "data: " + json.dumps(event, ensure_ascii=False) + "\n\n")

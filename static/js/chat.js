@@ -271,6 +271,14 @@ async function watchExisting(runId, text) {
   await new Promise(function (resolve) {
     const src = new EventSource('/api/chat/' + runId + '/events');
     let ended = false;
+    // CLEARED ON RECONNECT, NOT ON THE NEXT MESSAGE. The banner was only
+    // taken down by an arriving event, and the gap between events is minutes
+    // during a deep subagent — so a stream that had already recovered went on
+    // saying "connection lost" for as long as the subagent took. Observed
+    // live: the browser held an ESTABLISHED connection the whole time the
+    // page claimed to be reconnecting. A status line that lies about the
+    // thing it exists to report is worse than no status line.
+    src.onopen = function () { dropped.style.display = 'none'; };
     src.onmessage = function (msg) {
       const ev = JSON.parse(msg.data);
       if (ev.stage === 'end') {
