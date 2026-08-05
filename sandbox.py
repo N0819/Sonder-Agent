@@ -277,8 +277,26 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
     # `seconds` either way.
     timeout = max(1.0, min(float(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     harness = _harness_of(command)
-    if harness == "pytest":
-        import_paths = list(import_paths or []) + _pytest_path()
+    # WHERE PYTEST LIVES MUST NOT DEPEND ON HOW THE COMMAND SPELLS IT.
+    #
+    # This used to be inside `if harness == "pytest"`, which is the same guard
+    # one layer too shallow: it reads the OUTER argv, and the way you run a
+    # suite and capture its output is to write a program that shells out to
+    # pytest itself. That program's argv is `python3 -s main.py`, so the fold
+    # did not fire, the nested interpreter inherited a PYTHONPATH holding only
+    # the workspace, and the run came back `No module named pytest` — the same
+    # sentence, measured the same way, that the fold was written to end.
+    #
+    # Worse than a repeat: the outer process exited 0, because the program
+    # caught the failure and printed it as data. So neither harness guard in
+    # `coding.judge` could see it — they read the outer exit code and the
+    # outer stderr — and a broken tool was graded a REFUTATION of the
+    # hypothesis. Rule 4, defeated by nesting rather than by argument.
+    #
+    # `harness` stays keyed on the command, because that decides how the
+    # OUTER run is GRADED and a nested pytest is not the outer harness. Only
+    # the path is unconditional.
+    import_paths = list(import_paths or []) + _pytest_path()
     workspace = tempfile.mkdtemp(prefix="assistant-exp-")
     try:
         for relative, contents in (files or {}).items():

@@ -23,6 +23,8 @@ Four rules, each inherited from a scar in Sonder Engine:
 
 from __future__ import annotations
 
+import sys
+
 import coding
 import memory
 import research
@@ -741,3 +743,32 @@ def test_two_different_databases_are_two_different_experiments(temp_db):
     first = coding._digest(1, "x", ["python3"], {}, {"a.db": b"\x00one"})
     second = coding._digest(1, "x", ["python3"], {}, {"a.db": b"\x00two"})
     assert first != second
+
+
+def test_pytest_is_reachable_from_a_program_that_shells_out_to_it(temp_db):
+    """The way you run a suite and capture its output is to write a program
+    that invokes pytest itself — so the argv is `python3 -s main.py` and the
+    fold keyed on the outer command never fires. Measured in production: the
+    nested interpreter inherited a PYTHONPATH holding only the workspace and
+    returned `No module named pytest`, the same sentence the fold was written
+    to end. The outer process exited 0, because the program caught the failure
+    and printed it as data, so both harness guards in `judge` were blind to it
+    and a broken tool was graded a refutation."""
+    source = (
+        "import subprocess, sys\n"
+        "out = subprocess.run([sys.executable, '-s', '-m', 'pytest',"
+        " '--version'], capture_output=True, text=True)\n"
+        "print('RC', out.returncode)\n"
+        "print('ERR', out.stderr.strip()[:80])\n")
+    result = sandbox.run({"main.py": source}, [sys.executable, "-s", "main.py"])
+    assert "No module named pytest" not in result["stdout"], result["stdout"]
+    assert "RC 0" in result["stdout"], result["stdout"]
+
+
+def test_a_nested_pytest_does_not_restamp_the_outer_harness(temp_db):
+    """`harness` decides how the OUTER run is graded — `_PYTEST_HARNESS_EXITS`
+    reads the outer exit code — and a program that happens to invoke pytest
+    inside itself is not a pytest run. Only the path is unconditional."""
+    result = sandbox.run({"main.py": "print('hi')"},
+                         [sys.executable, "-s", "main.py"])
+    assert result["harness"] == ""
