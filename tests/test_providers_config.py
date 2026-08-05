@@ -753,3 +753,62 @@ def test_every_transport_failure_is_retried_and_named(failure, monkeypatch):
     assert len(tries) == 2, f"{type(failure).__name__} was not retried"
     assert "chat provider" in str(caught.value), \
         f"{type(failure).__name__} leaked a raw library string"
+
+
+def test_the_search_settings_are_actually_read(temp_db, monkeypatch):
+    """THE EMBEDDINGS SCAR, IN THE SAME APP TWICE. `_embed_config` exists
+    because the Settings tab displayed and saved embeddings fields that
+    nothing consulted — configuring them did nothing at all, silently, while
+    the page said otherwise. A search key the settings page accepts and no
+    code reads would be that defect reintroduced, and this time in the lane
+    that had just been found dead."""
+    import tools_web
+    tools_web.set_search_stub(None)
+    tools_web.set_search_backend(None)
+
+    config.save_config({"search_provider": "brave", "search_key": "sk-test"})
+    seen = {}
+
+    def fake(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["token"] = req.get_header("X-subscription-token")
+        raise TimeoutError("stop here; the wiring is what is under test")
+
+    monkeypatch.setattr(tools_web._opener, "open", fake)
+    got = tools_web.search_detail("BBC News")
+
+    assert "api.search.brave.com" in seen.get("url", ""), \
+        "the configured provider was never reached"
+    assert seen.get("token") == "sk-test", "the stored key was not sent"
+    assert got["status"] == "error"
+
+
+def test_a_keyless_backend_choice_is_honoured(temp_db, monkeypatch):
+    """DuckDuckGo is kept selectable rather than deleted: the challenge that
+    killed it was observed from ONE network, and an anti-bot block is a
+    property of the requesting address as much as of the endpoint."""
+    import tools_web
+    tools_web.set_search_stub(None)
+    tools_web.set_search_backend(None)
+    config.save_config({"search_provider": "ddg", "search_key": ""})
+
+    seen = {}
+
+    def fake(req, timeout=None):
+        seen["url"] = req.full_url
+        raise TimeoutError("stop here")
+
+    monkeypatch.setattr(tools_web._opener, "open", fake)
+    tools_web.search_detail("BBC News")
+    assert "duckduckgo.com" in seen.get("url", "")
+
+
+def test_a_blocked_backend_names_itself_rather_than_the_query(temp_db):
+    """"The lane is down" and "this question has no answer" need opposite
+    responses and were one outcome. The loop kept rephrasing, which is the one
+    move that cannot help."""
+    import tools_web
+    challenge = ("<html><title>Captcha</title>Please complete the following "
+                 "challenge to confirm this search was made by a human.</html>")
+    assert tools_web._parse_ddg(challenge, 5) == []
+    assert any(c in challenge.lower() for c in tools_web._BLOCK_CUES)

@@ -360,7 +360,7 @@ def test_a_blocked_search_lane_is_not_reported_as_no_results():
         tools_web.set_search_backend(None)
 
     # And the parser itself must call a challenge page blocked, not empty.
-    assert tools_web._parse_results(challenge, 5) == []
+    assert tools_web._parse_mojeek(challenge, 5) == []
     assert any(c in challenge.lower() for c in tools_web._BLOCK_CUES)
 
 

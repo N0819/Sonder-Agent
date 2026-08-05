@@ -312,13 +312,23 @@ const SETTING_FIELDS = [
   ['embed_model', 'Embeddings model', 'text'],
   ['embed_key', 'Embeddings API key (stored in assistant.db)', 'password'],
   ['embed_key_env', '…or the name of an env var holding it', 'text'],
+  // Search is its own provider for the same reason embeddings are: the
+  // keyless scrape rotted, and an install that cannot search cannot research.
+  ['search_provider', 'Web search (brave needs a key; ddg/mojeek are free)',
+   'select'],
+  ['search_key', 'Search API key (stored in assistant.db)', 'password'],
+  ['search_key_env', '…or the name of an env var holding it', 'text'],
 ];
+
+// Blank means the built-in keyless default (mojeek).
+const SEARCH_PROVIDERS = ['', 'mojeek', 'ddg', 'brave'];
 
 // A stored key is never sent back to the page, so its input is always drawn
 // blank — which makes "blank" mean "unchanged", not "delete". Clearing is a
 // separate, deliberate act. `config.CLEAR_SECRET`.
 const CLEAR_SECRET = '__clear__';
-const KEY_VALUE_FIELDS = { chat_key: 'chat_key_env', embed_key: 'embed_key_env' };
+const KEY_VALUE_FIELDS = { chat_key: 'chat_key_env', embed_key: 'embed_key_env',
+                           search_key: 'search_key_env' };
 
 async function applyPreset(role, preset) {
   if (!preset) return;
@@ -394,11 +404,19 @@ async function loadSettings(prefetched) {
     let input;
     if (type === 'select') {
       input = el('<select></select>');
-      for (const p of out.providers) {
+      // Two selects now, and the options are not interchangeable. Rendering
+      // every select from the chat provider list put "Claude Code CLI" in the
+      // search box, which is a setting that cannot mean anything.
+      const isSearch = field === 'search_provider';
+      for (const p of (isSearch ? SEARCH_PROVIDERS : out.providers)) {
         const opt = el('<option></option>');
         opt.value = p;
-        opt.textContent = p === 'claude-code'
-          ? 'Claude Code CLI' : 'OpenAI-compatible HTTP';
+        opt.textContent = isSearch
+          ? ({ '': 'Mojeek (default, no key)', mojeek: 'Mojeek (no key)',
+               ddg: 'DuckDuckGo (no key)',
+               brave: 'Brave Search API (needs a key)' })[p]
+          : (p === 'claude-code'
+             ? 'Claude Code CLI' : 'OpenAI-compatible HTTP');
         input.appendChild(opt);
       }
     } else {

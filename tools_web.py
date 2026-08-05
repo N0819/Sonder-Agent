@@ -7,13 +7,24 @@
 # offline, and a research test that needs the live web is a test that fails
 # on the train.
 #
-# The default search backend is DuckDuckGo's HTML endpoint because it needs
-# no API key; it is a best-effort scrape and is expected to rot eventually.
-# When it does, set_search_backend swaps it without touching the research
-# machinery — the contract is just [(title, url, snippet)].
+# Search has three tiers, because the keyless one rotted exactly as this
+# comment used to predict it would. DuckDuckGo began answering its HTML
+# endpoint with an anti-bot challenge, and the lane returned zero for an
+# unknown number of turns while reporting only "search returned nothing".
+#
+#   brave   — keyed, the only tier that is actually dependable
+#   mojeek  — keyless default; works, but rate-limits to a CAPTCHA
+#   ddg     — keyless, blocked from at least one network and kept anyway,
+#             because a block is a property of the requesting address too
+#
+# `set_search_backend` swaps any of it without touching the research
+# machinery — the contract is [{title, url, snippet}] or a full
+# {results, status, detail}. That function was promised here for a long time
+# before it existed, which is why the rot had no recovery path when it came.
 
 import html
 import ipaddress
+import json
 import re
 import socket
 import urllib.error
@@ -154,7 +165,8 @@ def _strip_html(markup):
 # user-agent above — no key, no browser spoofing, and explicit <!--rs-->
 # result delimiters, which give the title/url/snippet grouping this parser
 # used to have to reconstruct by splitting on anchors.
-_SEARCH_BASE = "https://www.mojeek.com/search?q="
+_SEARCH_BASE_MOJEEK = "https://www.mojeek.com/search?q="
+_SEARCH_BASE_DDG = "https://html.duckduckgo.com/html/?q="
 
 # A backend that has started refusing us does not say so in a status code —
 # DDG returned 202, which is a success. The cues are what distinguishes
@@ -165,7 +177,32 @@ _BLOCK_CUES = ("captcha", "unusual traffic", "are you a robot",
                "complete the following challenge")
 
 
-def _parse_results(page, max_results):
+def _parse_ddg(page, max_results):
+    """DuckDuckGo's HTML endpoint. Kept selectable rather than deleted: the
+    challenge that killed it was observed from ONE network, and an anti-bot
+    block is a property of the requesting address as much as of the endpoint.
+    An install that is not flagged may still get results here, and the block
+    detection below reports it honestly when it does not."""
+    out = []
+    for block in re.split(r'(?=<a[^>]+class="result__a")', page):
+        m = re.search(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>'
+                      r'(.*?)</a>', block, re.S)
+        if not m:
+            continue
+        href, title = m.group(1), _strip_html(m.group(2))
+        # DDG wraps result urls in a redirect; unwrap to cite the REAL url —
+        # an evidence row pointing at a redirector is not a citation.
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+        sm = re.search(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+                       block, re.S)
+        out.append({"title": title[:200], "url": qs.get("uddg", [href])[0],
+                    "snippet": _strip_html(sm.group(1))[:400] if sm else ""})
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def _parse_mojeek(page, max_results):
     """Result blocks → [{title, url, snippet}].
 
     ONE PASS OVER WHOLE RESULT BLOCKS, not two independent passes zipped by
@@ -192,6 +229,119 @@ def _parse_results(page, max_results):
 
 
 _search_backend = None
+
+# Keyed providers, by the name stored in `search_provider`. The contract is
+# the same one `set_search_backend` takes, so a provider added here and a
+# backend injected at runtime are the same kind of thing to everything above.
+BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+
+
+def _brave_search(query, max_results, key):
+    """Brave Search API → {results, status, detail}.
+
+    A REAL INDEX BEHIND A KEY, because the keyless scrape is finished:
+    DuckDuckGo challenges its HTML endpoint and Mojeek rate-limits to a
+    CAPTCHA within a couple of queries. Neither is a lane a research loop can
+    depend on, and no amount of parsing fixes a page that carries no results."""
+    url = (BRAVE_ENDPOINT + "?q=" + urllib.parse.quote_plus(str(query or ""))
+           + "&count=" + str(max(1, min(int(max_results or 5), 20))))
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json", "X-Subscription-Token": key})
+    try:
+        with _opener.open(req, timeout=_TIMEOUT) as r:
+            payload = json.loads(r.read(_MAX_BYTES).decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        # 401/403 and "you are out of quota" need opposite actions, and both
+        # arrive as an empty result list if nobody reads the status.
+        detail = f"HTTP {exc.code}"
+        if exc.code in (401, 403):
+            detail += " — the search key was rejected"
+        elif exc.code == 429:
+            detail += " — the search plan's rate limit or quota is spent"
+        return {"results": [], "status": "error", "detail": detail}
+    except Exception as exc:
+        return {"results": [], "status": "error",
+                "detail": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    rows = []
+    for item in ((payload.get("web") or {}).get("results") or []):
+        rows.append({"title": str(item.get("title") or "")[:200],
+                     "url": str(item.get("url") or ""),
+                     "snippet": _strip_html(
+                         str(item.get("description") or ""))[:400]})
+        if len(rows) >= max_results:
+            break
+    return {"results": rows, "status": "ok" if rows else "empty", "detail": ""}
+
+
+# The keyless backends, by the name stored in `search_provider`. Both are
+# scrapes and both can be blocked; which one works is a property of the
+# network the install runs on, so this is a choice rather than a default with
+# a dead alternative deleted behind it.
+SCRAPE_BACKENDS = {
+    "mojeek": (_SEARCH_BASE_MOJEEK, _parse_mojeek),
+    "ddg": (_SEARCH_BASE_DDG, _parse_ddg),
+}
+DEFAULT_SCRAPE = "mojeek"
+
+
+def _scrape_name():
+    """Which keyless backend the settings ask for, defaulting to Mojeek."""
+    try:
+        import config
+        name = str(config.get_config().get("search_provider")
+                   or "").strip().lower()
+    except Exception:
+        name = ""
+    return name if name in SCRAPE_BACKENDS else DEFAULT_SCRAPE
+
+
+def _scrape_search(query, max_results, name):
+    """One keyless backend, with the reason it came back empty."""
+    base, parse = SCRAPE_BACKENDS[name]
+    try:
+        req = urllib.request.Request(
+            base + urllib.parse.quote_plus(str(query or "")), headers=_UA)
+        with _opener.open(req, timeout=_TIMEOUT) as r:
+            page, err = _read_text(r)
+        if err:
+            return {"results": [], "status": "error", "detail": err}
+    except Exception as exc:
+        return {"results": [], "status": "error",
+                "detail": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    results = parse(page, max_results)
+    if not results and any(c in page.lower() for c in _BLOCK_CUES):
+        return {"results": [], "status": "blocked",
+                "detail": f"{name} served an anti-bot challenge instead of "
+                          "results; the lane is down, not the query. Try the "
+                          "other keyless backend, or set a Brave key."}
+    return {"results": results, "status": "ok" if results else "empty",
+            "detail": ""}
+
+
+def _configured_backend():
+    """The keyed provider named in SETTINGS, or None to fall through.
+
+    READ FROM SETTINGS, NOT PAST THEM. `_embed_config` carries the scar this
+    is avoiding: the Settings tab displayed and saved embeddings fields that
+    nothing consulted, so configuring them did nothing at all, silently, while
+    the page said otherwise. A search key that the settings page accepts and
+    no code reads would be the same defect in the same app twice."""
+    try:
+        import config
+        cfg = config.get_config()
+        name = str(cfg.get("search_provider") or "").strip().lower()
+        if name != "brave":
+            return None
+        key = config.secret_for("search_key_env")
+        if not key:
+            return lambda q, n: {
+                "results": [], "status": "error",
+                "detail": "search_provider is 'brave' but no key is set — "
+                          "paste one in Settings or export "
+                          f"{cfg.get('search_key_env')!r}"}
+        return lambda q, n: _brave_search(q, n, key)
+    except Exception:
+        return None
 
 
 def set_search_backend(fn):
@@ -230,9 +380,10 @@ def search_detail(query, max_results=5):
         rows = list(_search_stub(query, max_results) or [])
         return {"results": rows, "status": "ok" if rows else "empty",
                 "detail": ""}
-    if _search_backend is not None:
+    backend = _search_backend or _configured_backend()
+    if backend is not None:
         try:
-            got = _search_backend(query, max_results)
+            got = backend(query, max_results)
         except Exception as exc:
             return {"results": [], "status": "error",
                     "detail": f"search backend raised "
@@ -246,24 +397,7 @@ def search_detail(query, max_results=5):
         rows = list(got or [])
         return {"results": rows, "status": "ok" if rows else "empty",
                 "detail": ""}
-    try:
-        url = _SEARCH_BASE + urllib.parse.quote_plus(str(query or ""))
-        req = urllib.request.Request(url, headers=_UA)
-        with _opener.open(req, timeout=_TIMEOUT) as r:
-            page, err = _read_text(r)
-        if err:
-            return {"results": [], "status": "error", "detail": err}
-    except Exception as exc:
-        return {"results": [], "status": "error",
-                "detail": f"{type(exc).__name__}: {str(exc)[:200]}"}
-    results = _parse_results(page, max_results)
-    if not results and any(c in page.lower() for c in _BLOCK_CUES):
-        return {"results": [], "status": "blocked",
-                "detail": "the search backend served an anti-bot challenge "
-                          "instead of results; the lane is down, not the "
-                          "query"}
-    return {"results": results, "status": "ok" if results else "empty",
-            "detail": ""}
+    return _scrape_search(query, max_results, _scrape_name())
 
 
 def search(query, max_results=5):

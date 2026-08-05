@@ -85,6 +85,15 @@ _DEFAULTS = {
     # environment never acquires one.
     "chat_key": lambda: "",
     "embed_key": lambda: "",
+    # SEARCH IS ITS OWN PROVIDER TOO, and for the same reason embeddings are:
+    # the keyless scrape this module shipped with is gone. DuckDuckGo now
+    # answers it with an anti-bot challenge, so every research query returned
+    # zero — including a bare "BBC News" control — while the loop reported
+    # only "search returned nothing". "" leaves the built-in scrape in place,
+    # which is honest about being blocked but will not find anything.
+    "search_provider": lambda: os.environ.get("ASSISTANT_SEARCH_PROVIDER", ""),
+    "search_key_env": lambda: "ASSISTANT_SEARCH_KEY",
+    "search_key": lambda: "",
 }
 
 # Known endpoints, so a working setup is a dropdown rather than a URL nobody
@@ -151,7 +160,8 @@ EMBED_PRESETS = {
 }
 
 # Which fields name an environment variable rather than carrying a value.
-KEY_FIELDS = frozenset({"chat_key_env", "embed_key_env"})
+KEY_FIELDS = frozenset({"chat_key_env", "embed_key_env",
+                        "search_key_env"})
 
 # Which fields carry a credential OUTRIGHT, stored in `assistant.db`.
 #
@@ -170,10 +180,13 @@ KEY_FIELDS = frozenset({"chat_key_env", "embed_key_env"})
 #   - a key here beats the environment (below), so what you typed is what
 #     runs — a stale export silently shadowing it is the failure this whole
 #     episode was made of.
-KEY_VALUE_FIELDS = frozenset({"chat_key", "embed_key"})
+KEY_VALUE_FIELDS = frozenset({"chat_key", "embed_key",
+                              "search_key"})
 
 # name field -> the value field that overrides it.
-_KEY_VALUE_FOR = {"chat_key_env": "chat_key", "embed_key_env": "embed_key"}
+_KEY_VALUE_FOR = {"chat_key_env": "chat_key",
+                  "embed_key_env": "embed_key",
+                  "search_key_env": "search_key"}
 
 # Sent by the UI's "Forget stored key" control. An empty string cannot mean
 # "clear" because it is what an untouched password field submits, and a
