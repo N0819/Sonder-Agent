@@ -30,6 +30,10 @@ import uuid
 # result and the reasoning trail. Bounded because this is a registry, not a
 # second copy of the turns table — the durable record is in the database.
 _MAX_RETAINED = 32
+# How long the browser waits before reconnecting a dropped stream. Short,
+# because the run on this side never stopped: the gap is a UI artefact and
+# should not read as a failure.
+_RECONNECT_MS = 750
 
 _runs = {}
 _order = []
@@ -141,13 +145,24 @@ class TurnRun:
             self._cond.notify_all()
             return "halting"
 
-    def follow(self, timeout=600.0):
-        """Yield events from the beginning, then live ones until the run ends.
+    def follow(self, timeout=600.0, since=0):
+        """Yield events from `since`, then live ones until the run ends.
 
-        Replays from index 0 so a client that connects a moment after POST
-        misses nothing — the recall stage in particular is usually over before
-        the browser has opened the stream."""
-        sent = 0
+        Replays from index 0 by default so a client that connects a moment
+        after POST misses nothing — the recall stage in particular is usually
+        over before the browser has opened the stream.
+
+        `since` IS WHAT MAKES A DROPPED CONNECTION SURVIVABLE. A reconnecting
+        client that replayed from zero would redraw every step it already had,
+        so the honest choices were "lose the trail" or "duplicate it"; neither
+        is a resume. The browser sends the last id it saw and picks up after
+        it, and because the run itself never stopped, the reconnection is
+        invisible in the result.
+
+        A `since` past the end of a FINISHED run still yields `end`: a client
+        that dropped during the commit and came back must be told how the turn
+        turned out, not left waiting on a stream with nothing more to say."""
+        sent = max(0, int(since or 0))
         deadline = time.time() + timeout
         while True:
             with self._cond:
@@ -228,7 +243,18 @@ def start(run, target):
     return run
 
 
-def sse(run):
-    """Server-sent events for one run."""
-    for event in run.follow():
-        yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+def sse(run, since=0):
+    """Server-sent events for one run, resumable.
+
+    Every frame carries an `id:` — its index — which is the whole resume
+    mechanism: EventSource remembers the last id it saw and returns it as
+    `Last-Event-ID` when it reconnects, with no bookkeeping in the page.
+
+    `retry:` sets the browser's own reconnect delay. Left unset it is
+    implementation-defined (3s in most engines), and the point of this
+    feature is that the gap should be short enough not to look like a
+    failure."""
+    yield f"retry: {_RECONNECT_MS}\n\n"
+    for event in run.follow(since=since):
+        yield (f"id: {event.get('i', 0)}\n"
+               + "data: " + json.dumps(event, ensure_ascii=False) + "\n\n")

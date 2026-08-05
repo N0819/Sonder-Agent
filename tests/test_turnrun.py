@@ -189,3 +189,95 @@ def test_an_unwatched_subagent_still_runs(temp_db, monkeypatch):
         {"action": "report", "report": {"summary": "fine"}}))
     out = subagents._run_scout("anything", turn_idx=1)
     assert out["summary"] == "fine"
+
+
+# ---- A dropped connection is not a dropped turn ----
+
+def test_a_reconnecting_client_resumes_instead_of_replaying(temp_db):
+    """Losing the pipe used to lose the turn: the stream closed, a retry was
+    offered, and taking it ran the whole thing a SECOND time while the first
+    was still going. The run never stopped — only the connection did.
+
+    Resume has to be exact in both directions. Replaying from zero redraws
+    every step the page already has; starting from "now" loses whatever
+    arrived during the gap. `since` is what makes it neither."""
+    run = turnrun.create("hello", None)
+    run.emit("recall", returned=3)
+    run.emit("respond", state="calling the model")
+    first = list(run.follow(timeout=1.0))
+    assert [e["stage"] for e in first] == ["recall", "respond"]
+
+    # ...the pipe drops here, and the turn carries on regardless.
+    run.emit("commit", state="writing")
+    run.finish("done", result={"reply": "ok"})
+
+    last_id = first[-1]["i"]
+    resumed = list(run.follow(timeout=1.0, since=last_id + 1))
+    assert [e["stage"] for e in resumed] == ["commit", "end"]
+    assert resumed[-1]["result"]["reply"] == "ok"
+
+
+def test_a_client_that_missed_the_ending_is_still_told_how_it_went(temp_db):
+    """The worst moment to drop is during the commit, because that is the one
+    stage that cannot be halted and the one whose outcome matters most. A
+    resume past the last event must still deliver `end` rather than waiting on
+    a stream with nothing more to say."""
+    run = turnrun.create("hello", None)
+    run.emit("commit", state="writing")
+    run.finish("done", result={"reply": "committed"})
+    # `since` well past the end — the client saw everything and then dropped.
+    events = list(run.follow(timeout=1.0, since=99))
+    assert [e["stage"] for e in events] == ["end"]
+    assert events[0]["result"]["reply"] == "committed"
+
+
+def test_every_frame_carries_an_id_so_the_browser_can_resume(temp_db):
+    """`Last-Event-ID` is the browser's own mechanism and it only works if the
+    frames are labelled. Without `id:` EventSource reconnects with no cursor
+    and the server has no choice but to replay everything."""
+    run = turnrun.create("hello", None)
+    run.emit("recall", returned=1)
+    run.finish("done", result={"reply": "ok"})
+    frames = "".join(turnrun.sse(run))
+    assert "retry: " in frames, "the reconnect delay is left to the browser"
+    ids = [ln for ln in frames.splitlines() if ln.startswith("id: ")]
+    # One per event plus the terminal `end`.
+    assert ids == ["id: 0", "id: 1"], frames
+
+
+def test_a_resumed_stream_starts_where_it_was_told_to(temp_db):
+    """The route turns `Last-Event-ID` into `since`, so the serialiser has to
+    honour it — an off-by-one here shows up as one duplicated or one missing
+    step, which is exactly the kind of thing nobody notices until they do."""
+    run = turnrun.create("hello", None)
+    run.emit("recall", returned=1)
+    run.emit("respond", state="one")
+    run.emit("commit", state="two")
+    run.finish("done", result={"reply": "ok"})
+    frames = "".join(turnrun.sse(run, since=2))
+    assert "id: 0" not in frames and "id: 1" not in frames
+    assert "id: 2" in frames and '"stage": "commit"' in frames
+
+
+def test_no_cursor_and_a_cursor_of_zero_are_different(temp_db):
+    """SHIPPED, AND SILENT. The route defaulted to the integer 0 and then
+    tested `str(cursor).strip()` — falsey as a number, truthy as "0" — so a
+    request with no `Last-Event-ID` took the resume branch and every fresh
+    stream began at event 1. Nothing surfaced it: event 0 renders as nothing
+    today, so the loss was invisible until a first event carried something.
+
+    Verified against a live server before it was fixed: a stream that should
+    have opened `id: 0` opened `id: 1`."""
+    import app
+    assert app.resume_cursor(None, None) == 0, "a fresh stream must start at 0"
+    assert app.resume_cursor("", None) == 0
+    assert app.resume_cursor("0", None) == 1, "id 0 was delivered; send 1 next"
+    assert app.resume_cursor("7", None) == 8
+    # The header wins over the query parameter, and only falls through when
+    # the browser did not send one.
+    assert app.resume_cursor("3", "99") == 4
+    assert app.resume_cursor(None, "3") == 4
+    # An unparseable cursor replays rather than skips: a duplicated trail is
+    # cosmetic, a skipped one loses the answer.
+    assert app.resume_cursor("nonsense", None) == 0
+    assert app.resume_cursor("-5", None) == 0

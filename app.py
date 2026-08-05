@@ -5,7 +5,7 @@
 
 import json
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -65,9 +65,39 @@ def chat_start(body: ChatIn):
     return {"turn_run_id": run.id}
 
 
+def resume_cursor(header, param):
+    """Which event index a reconnecting client should be sent from.
+
+    NO CURSOR AND A CURSOR OF ZERO ARE DIFFERENT THINGS, and conflating them
+    ate the first event of every fresh stream. The default was the integer 0,
+    which is falsey as a number and truthy as `"0"` — so a request with no
+    `Last-Event-ID` at all took the resume branch and started at 1. It was
+    invisible only because event 0 happens to render as nothing today; the day
+    a first event carries something, it would go missing with no error.
+
+    A function rather than an expression inside the route because that is what
+    made it untestable, and untestable is how it shipped. An unparseable
+    cursor replays from the start: a duplicated trail is a cosmetic fault and
+    a skipped one is a lost answer."""
+    cursor = header if header is not None else param
+    if cursor is None or not str(cursor).strip():
+        return 0
+    try:
+        # The id names the LAST event delivered, so resume from the next one.
+        return max(0, int(str(cursor).strip()) + 1)
+    except (TypeError, ValueError):
+        return 0
+
+
 @app.get("/api/chat/{run_id}/events")
-def chat_events(run_id: str):
+def chat_events(run_id: str, request: Request):
     """Server-sent events for one turn: a step per stage, then `end`.
+
+    RESUMABLE. `Last-Event-ID` is the browser's own reconnect mechanism —
+    EventSource remembers the last id it received and sends it back
+    automatically — so a dropped connection picks up after the step it already
+    had rather than replaying the trail or losing it. The run never stopped;
+    only the pipe did.
 
     `X-Accel-Buffering: no` because a buffering proxy in front of this would
     deliver the whole stream at the end, which is indistinguishable from the
@@ -75,11 +105,31 @@ def chat_events(run_id: str):
     absent."""
     run = turnrun.get(run_id)
     if run is None:
+        # 404 is load-bearing: EventSource does NOT reconnect after a non-2xx,
+        # so a run the registry has dropped ends the client's retry loop
+        # instead of leaving it reconnecting forever against nothing.
         return JSONResponse({"error": "unknown turn"}, status_code=404)
+    since = resume_cursor(request.headers.get("last-event-id"),
+                          request.query_params.get("since"))
     return StreamingResponse(
-        turnrun.sse(run), media_type="text/event-stream",
+        turnrun.sse(run, since=since), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"})
+
+
+@app.get("/api/chat/{run_id}")
+def chat_status(run_id: str):
+    """Where a turn got to. What a page reloaded mid-turn asks first.
+
+    A stream can be re-opened, but only if the client still knows there is
+    something to re-open — so the run id outlives the page and this is how it
+    is redeemed."""
+    run = turnrun.get(run_id)
+    if run is None:
+        return JSONResponse({"error": "unknown turn"}, status_code=404)
+    return {"id": run.id, "status": run.status, "text": run.text,
+            "events": len(run.events), "result": run.result,
+            "error": run.error}
 
 
 @app.delete("/api/chat/{run_id}")
