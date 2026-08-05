@@ -4,6 +4,7 @@
 # these tests protect is not the numbers but the STRUCTURE the numbers hang
 # from — the failure each one encodes actually happened there.
 
+import pipeline
 import memory
 
 
@@ -119,3 +120,45 @@ def test_access_count_is_written_and_never_ranked(temp_db):
     after = memory.q("SELECT access_count FROM memories WHERE id=?",
                      (mid,), one=True)["access_count"]
     assert after == before
+
+
+def test_recall_is_bounded_by_characters_not_row_count(temp_db):
+    """THE CEILING THAT EXISTS FOR COST WAS DENOMINATED IN THE WRONG UNIT.
+    `RECALL_LIMIT` is a count, and its own comment says it "is set where cost,
+    not cognition, argues for it" — but cost is bytes. Measured on the turn
+    this was found by: 236,870 characters of memory, 92% of the payload, 61%
+    of every byte in the bank, inside a turn of ~282,000 tokens. The model
+    returned unparseable output. Count was not the culprit — the median 56
+    rows at the 1,320-char mean is 74k — so ranking is selecting the LARGEST
+    rows and a row cap cannot see that."""
+    rows = [{"content": "x" * 5000, "id": n} for n in range(20)]
+    kept, spent, dropped = memory._fit_recall_budget(rows, budget=12000)
+
+    assert spent <= 12000
+    assert len(kept) + dropped == len(rows)
+    assert kept == rows[:len(kept)], "rank order must survive the cut"
+
+
+def test_one_oversized_memory_still_comes_back(temp_db):
+    """Returning nothing would hide a mint-side problem behind what looks
+    exactly like a bank with nothing to say."""
+    rows = [{"content": "x" * 99000, "id": 1}]
+    kept, spent, dropped = memory._fit_recall_budget(rows, budget=1000)
+
+    assert len(kept) == 1 and dropped == 0
+    assert spent == 99000
+
+
+def test_an_episode_declares_the_half_it_did_not_keep(temp_db):
+    """An episode is a record of an exchange, not a transcript of it. Both
+    halves were stored whole, so a pasted brief became the largest row in the
+    bank (13,407 chars) and then outranked everything in recall, because a long
+    prompt is also a rich match for questions about its own topic. The archive
+    says when it is a partial copy — `research.py` carries the same pattern for
+    evidence excerpts."""
+    short = pipeline._episode_half("a normal sentence")
+    assert short == "a normal sentence", "an ordinary turn is stored whole"
+
+    long_half = pipeline._episode_half("y" * 9000)
+    assert len(long_half) <= pipeline.EPISODE_HALF_CHARS
+    assert "9000 chars total" in long_half, "the true length must survive"

@@ -64,6 +64,22 @@ def _salience_of(text):
     return round(min(s, 0.95), 3)
 
 
+# How much of one side of an exchange an episode keeps. Generous enough that
+# an ordinary turn is stored whole — the median memory in this bank is well
+# under it — and small enough that a pasted brief cannot become the largest
+# row in the corpus and then outrank everything in recall forever.
+EPISODE_HALF_CHARS = 1200
+
+
+def _episode_half(text):
+    """One side of an exchange, cut with the cut declared."""
+    text = str(text or "")
+    if len(text) <= EPISODE_HALF_CHARS:
+        return text
+    marker = f" …[cut: {len(text)} chars total]"
+    return text[:EPISODE_HALF_CHARS - len(marker)].rstrip() + marker
+
+
 def _ref_in_bank(name):
     """The STORED spelling of a ref, or "" when no such row exists anywhere.
 
@@ -932,10 +948,23 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
     # them. Retrieval cannot repair a row whose provenance is wrong, and
     # nothing downstream could have caught it: the row is well-formed, richly
     # salient, and false.
-    exchange = (f"User said: {user_text}\nI replied: {reply}"
+    # AN EPISODE IS A RECORD OF AN EXCHANGE, NOT A TRANSCRIPT OF IT. Both
+    # halves were stored whole, so a long prompt became a permanent memory as
+    # long as itself — the largest in this bank is 13,407 characters, and it is
+    # a pasted audit brief. Those rows then dominate every later recall,
+    # because a long prompt is also a rich match for questions about its own
+    # topic: turn 79's memory block reached 236,870 characters, 92% of the
+    # payload, and the model returned unparseable output.
+    #
+    # Truncated with the true length recorded, exactly as `research.py` does
+    # for evidence excerpts. The archive says when it is a partial copy —
+    # silently storing half an exchange as though it were the whole one is the
+    # failure that pattern exists to prevent.
+    said, told = _episode_half(user_text), _episode_half(reply)
+    exchange = (f"User said: {said}\nI replied: {told}"
                 if speaker == "user" else
-                f"Continuing my own work, I set out to: {user_text}\n"
-                f"I then reported: {reply}")
+                f"Continuing my own work, I set out to: {said}\n"
+                f"I then reported: {told}")
     to_mint.append(dict(
         kind="episodic", provenance="witnessed",
         salience=_salience_of(exchange), content=exchange,

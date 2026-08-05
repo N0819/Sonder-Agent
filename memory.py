@@ -936,8 +936,51 @@ _RELEVANCE_FLOOR_RATIO = 0.45
 # returning two rows and reading as an empty memory.
 _RECALL_FLOOR = 6
 
+# THE CEILING THAT EXISTS FOR COST WAS DENOMINATED IN THE WRONG UNIT.
+# `RECALL_LIMIT` is a COUNT, and its own comment says it "is set where cost,
+# not cognition, argues for it" — but cost is bytes. Memories in this bank run
+# from a couple of hundred characters to 13,407, so 64 rows is anywhere from
+# 8k to 500k characters and the ceiling bounds nothing that is actually paid
+# for.
+#
+# Measured on turn 79, the turn this was found by: the memory block was
+# 236,870 characters — 92% of the payload and 61% of every byte of memory
+# content in the bank — inside a turn totalling ~282,000 tokens across four
+# rounds. The model returned unparseable output, which is what a payload that
+# size buys. Count was NOT the culprit: 56 rows (the median) at the 1,320-char
+# mean is 74k, so relevance ranking is preferentially selecting the LARGEST
+# rows, and a count cap cannot see that.
+#
+# Applied after ranking, never during it: which memories are relevant is a
+# question for the ranker, and this only decides how many of its answers fit.
+# Rows are kept in the order the ranker chose, so the cut always falls at the
+# least relevant end.
+RECALL_CHAR_BUDGET = 24000
+
 _SUMMARY_RECALL_LIMIT = 2
 _ASPECT_WEIGHT = 0.55
+
+
+def _fit_recall_budget(rows, budget=RECALL_CHAR_BUDGET):
+    """Keep recalled rows, in rank order, until the character budget is spent.
+
+    Returns `(kept, spent, dropped)`. The first row is always kept whatever it
+    costs: a single memory larger than the whole budget is a mint-side problem
+    and returning nothing would hide it behind an empty recall.
+
+    NEVER re-orders and never re-scores. The ranker decided what is relevant;
+    this decides only how much of its answer fits in a payload that has to be
+    read by a model. A cut here is reported, not silent — `recall.budget` in
+    retrieval health carries what was dropped, because a recall that quietly
+    shrank looks exactly like a bank that has nothing to say."""
+    kept, spent = [], 0
+    for row in rows:
+        size = len(str(row.get("content") or ""))
+        if kept and spent + size > budget:
+            continue
+        kept.append(row)
+        spent += size
+    return kept, spent, len(rows) - len(kept)
 
 
 def _fts_query(text):
@@ -1846,6 +1889,7 @@ def build_memory_context(current_turn_idx, query_text, *, aspects=None,
                                current_turn_idx=current_turn_idx,
                                aspects=aspects, embedded=embedded)
     recalled = [m for m in recalled if m["id"] not in recent_ids]
+    recalled, recall_spent, recall_dropped = _fit_recall_budget(recalled)
     # Deliberate recall: one query the assistant set for itself. Additive and
     # explicitly labelled; results already in normal recall are tagged, not
     # duplicated.
@@ -1935,6 +1979,13 @@ def build_memory_context(current_turn_idx, query_text, *, aspects=None,
         "pondered": len(pondered),
         "ceiling": recall_limit,
         "at_ceiling": len(recalled) >= recall_limit,
+        # The cut that actually binds. `at_ceiling` answers a question about
+        # rows; this answers the one about bytes, which is what a payload is
+        # billed and read in. Reported so a recall that shrank for cost cannot
+        # be mistaken for a bank with nothing to say.
+        "chars": recall_spent,
+        "char_budget": RECALL_CHAR_BUDGET,
+        "dropped_for_size": recall_dropped,
     }
     return payload, {"delivered_refs": delivered,
                      "retrieval_health": health}
