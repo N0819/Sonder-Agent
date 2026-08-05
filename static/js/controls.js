@@ -424,6 +424,27 @@ async function loadSettings(prefetched) {
       input.type = type;
     }
     input.value = out.config[key];
+    // A SELECT SILENTLY DISCARDS A VALUE IT CANNOT DISPLAY, and then Save
+    // writes back what it is DISPLAYING. `search_provider` held
+    // "openai-compatible" — written by an earlier build that rendered both
+    // selects from the chat list — so this page showed "Mojeek (default)",
+    // and a user who pasted a Brave key and pressed Save had their provider
+    // silently rewritten to the option the box happened to be resting on.
+    // Their key stored correctly and was never read. It then happened a
+    // second time to a provider set correctly from outside the page.
+    //
+    // So: show the truth instead. An unrecognised stored value becomes a
+    // visible option, labelled, and the save-side validation refuses it — a
+    // form that cannot display its own data must not be allowed to overwrite
+    // it by omission.
+    const stored = String(out.config[key] == null ? '' : out.config[key]);
+    if (input.tagName === 'SELECT' && input.value !== stored) {
+      const odd = el('<option></option>');
+      odd.value = stored;
+      odd.textContent = stored + '  (not a valid choice — pick one above)';
+      input.appendChild(odd);
+      input.value = stored;
+    }
     input.dataset.key = key;
     field.appendChild(input);
 

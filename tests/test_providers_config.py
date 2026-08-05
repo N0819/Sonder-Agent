@@ -850,3 +850,22 @@ def test_brave_without_a_key_says_so(temp_db):
     config.save_config({"search_provider": "brave",
                         "search_key": config.CLEAR_SECRET})
     assert any("no key is set" in w for w in config.config_warnings())
+
+
+def test_the_settings_page_cannot_silently_rewrite_a_value_it_cannot_show():
+    """A <select> silently discards a value that is not among its options, and
+    Save then writes back what it is DISPLAYING. `search_provider` held
+    "openai-compatible", so the page showed "Mojeek (default)", and a user who
+    pasted a Brave key and pressed Save had their provider rewritten to the
+    option the box happened to be resting on. Their key stored correctly and
+    was never read. It then happened a SECOND time, to a provider that had
+    been set correctly from outside the page — which is how it was found.
+
+    A form that cannot display its own data must not be allowed to overwrite
+    it by omission."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static/js/controls.js")).read()
+    body = js.split("input.value = out.config[key];", 1)[1][:1200]
+    assert "SELECT" in body, "the mismatch has to be detected on selects"
+    assert "not a valid choice" in body, "and shown, not silently corrected"
