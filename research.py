@@ -618,11 +618,21 @@ def research_loop(hid, ask_model, turn_idx, *, max_rounds=RESEARCH_MAX_ROUNDS,
                       "detail": {k: v for k, v in act.items()
                                  if k != "action"}})
         if action == "search":
-            last_search = tools_web.search(str(act.get("query") or
-                                               hyp["question"]),
-                                          max_results=search_results)
+            found = tools_web.search_detail(
+                str(act.get("query") or hyp["question"]),
+                max_results=search_results)
+            last_search = found["results"]
             if not last_search:
-                warnings.append("search returned nothing")
+                # A DEAD LANE AND A QUIET ONE NEED OPPOSITE RESPONSES, and
+                # this said "search returned nothing" for both. When the
+                # backend was serving a CAPTCHA every query looked like a
+                # question with no answer, so the loop kept rephrasing and
+                # re-searching — the one move that cannot help — and the
+                # operator was never told the lane needed fixing.
+                warnings.append(
+                    f"search unavailable: {found['detail']}"
+                    if found["status"] in ("blocked", "error")
+                    else "search returned nothing")
         elif action == "fetch":
             url = str(act.get("url") or "").strip()
             page = tools_web.fetch(url)

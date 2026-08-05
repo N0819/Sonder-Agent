@@ -334,3 +334,46 @@ def test_a_closed_hypothesis_does_not_absorb_a_fresh_question(temp_db):
     qi("UPDATE hypotheses SET status='closed' WHERE id=?", (first["id"],))
     again = research.open_hypothesis("Is the index stale?", 2)
     assert again["id"] != first["id"]
+
+
+def test_a_blocked_search_lane_is_not_reported_as_no_results():
+    """THE LANE DIED SILENTLY AND COST A WHOLE RESEARCH RUN. `search` collapsed
+    every failure to an empty list, so when DuckDuckGo began answering the
+    endpoint with an anti-bot challenge — HTTP 202, no result markup, every
+    query zero including a bare "BBC News" control — the only signal anywhere
+    was "search returned nothing". Indistinguishable from a question that has
+    no answer, so the loop kept rephrasing and re-searching, which is the one
+    move that cannot help, and the operator was never told the lane needed
+    fixing. A dead lane and a quiet one need opposite responses."""
+    challenge = ("<html><title>Captcha</title><body>Please complete the "
+                 "following challenge to confirm this search was made by a "
+                 "human.</body></html>")
+    tools_web.set_search_stub(None)
+    tools_web.set_search_backend(
+        lambda q, n: {"results": [], "status": "blocked",
+                      "detail": "anti-bot challenge"})
+    try:
+        got = tools_web.search_detail("BBC News")
+        assert got["status"] == "blocked"
+        assert got["results"] == []
+    finally:
+        tools_web.set_search_backend(None)
+
+    # And the parser itself must call a challenge page blocked, not empty.
+    assert tools_web._parse_results(challenge, 5) == []
+    assert any(c in challenge.lower() for c in tools_web._BLOCK_CUES)
+
+
+def test_the_backend_the_module_promised_can_actually_be_swapped():
+    """The header comment has said "when it does [rot], set_search_backend
+    swaps it without touching the research machinery" since the module was
+    written, and no such function existed. The one documented recovery path
+    for the failure it correctly predicted was never built."""
+    assert hasattr(tools_web, "set_search_backend")
+    tools_web.set_search_stub(None)
+    tools_web.set_search_backend(
+        lambda q, n: [{"title": "T", "url": "https://e.com", "snippet": "s"}])
+    try:
+        assert tools_web.search("anything")[0]["url"] == "https://e.com"
+    finally:
+        tools_web.set_search_backend(None)
