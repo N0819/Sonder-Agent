@@ -183,6 +183,15 @@ KEY_FIELDS = frozenset({"chat_key_env", "embed_key_env",
 KEY_VALUE_FIELDS = frozenset({"chat_key", "embed_key",
                               "search_key"})
 
+# THE VALID SEARCH PROVIDERS, in Python, because the only copy lived in
+# `controls.js` and nothing on this side ever checked. `search_provider` was
+# found holding "openai-compatible" — a CHAT provider value, written by an
+# earlier build that rendered both selects from the chat list — and because
+# `_configured_backend` matches on "brave" and nothing else, a paid Brave key
+# sat stored and unread while every search fell through to the free scrapers.
+# The settings page looked right, the key was right, and the lane was dead.
+SEARCH_PROVIDERS = ("", "mojeek", "ddg", "brave")
+
 # name field -> the value field that overrides it.
 _KEY_VALUE_FOR = {"chat_key_env": "chat_key",
                   "embed_key_env": "embed_key",
@@ -304,6 +313,20 @@ def save_config(values):
                     f"{config_default(field)!r} in the shell instead.")
                 continue
             clean[field] = value
+        elif field == "search_provider":
+            name = str(value or "").strip().lower()
+            if name not in SEARCH_PROVIDERS:
+                # REFUSED, NOT FOLDED. A bad value here is not a typo with an
+                # obvious correction — quietly rewriting it to the default
+                # would leave the user's real intent unrecorded and the page
+                # agreeing with a choice they did not make.
+                warnings.append(
+                    f"{name!r} is not a search provider — leaving the setting "
+                    "as it was. Choose one of: "
+                    + ", ".join(repr(p or "(default: mojeek)")
+                                for p in SEARCH_PROVIDERS))
+                continue
+            clean[field] = name
         elif field in ("chat_base", "embed_base"):
             clean[field] = _fold_base_url(value)
         else:
@@ -400,6 +423,29 @@ def config_warnings(config=None):
                 "no chat key: paste one into the chat key field, or set the "
                 f"environment variable {config['chat_key_env']!r} — requests "
                 "will go out unauthenticated until then")
+    # A KEY NOBODY READS IS THE FAILURE THIS EXISTS FOR. `_configured_backend`
+    # matches "brave" and nothing else, so any other provider means a stored
+    # search key is never used — and the page shows a filled key field either
+    # way, because `redacted_status` cannot re-display it. Measured live: a
+    # working 31-character Brave key stored, provider reading
+    # "openai-compatible", every search for six turns falling through to the
+    # keyless scrapers, which refuse real research queries while answering
+    # short controls. Nothing anywhere connected those three facts.
+    search = str(config.get("search_provider") or "").strip().lower()
+    if search not in SEARCH_PROVIDERS:
+        warnings.append(
+            f"search provider {search!r} is not one I recognise, so the "
+            "keyless scraper is being used instead. Set it to 'brave' (with a "
+            "key), 'mojeek', or 'ddg'")
+    elif search != "brave" and secret_for("search_key_env"):
+        warnings.append(
+            "a search key is stored but the search provider is "
+            f"{search or 'the keyless default'!r}, which does not read it — "
+            "set the provider to 'brave' to use the key you saved")
+    elif search == "brave" and not secret_for("search_key_env"):
+        warnings.append(
+            "search provider is 'brave' but no key is set: paste one in the "
+            f"search key field or export {config.get('search_key_env')!r}")
     if config["embed_base"] and not config["embed_model"]:
         warnings.append("embeddings have a base URL but no model; retrieval "
                         "will stay on the lexical fallback")

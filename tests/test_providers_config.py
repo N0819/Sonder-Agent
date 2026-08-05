@@ -812,3 +812,41 @@ def test_a_blocked_backend_names_itself_rather_than_the_query(temp_db):
                  "challenge to confirm this search was made by a human.</html>")
     assert tools_web._parse_ddg(challenge, 5) == []
     assert any(c in challenge.lower() for c in tools_web._BLOCK_CUES)
+
+
+def test_a_search_key_nobody_reads_is_reported(temp_db):
+    """`_configured_backend` matches "brave" and nothing else, so any other
+    provider means a stored search key is never used — and the page shows a
+    filled key field either way, because `redacted_status` cannot re-display
+    it. Measured live: a working 31-character Brave key stored, provider
+    reading "openai-compatible", every search for six turns falling through to
+    the keyless scrapers — which refuse real research queries while answering
+    short controls, so a control query proved the lane worked. Nothing
+    anywhere connected those three facts."""
+    config.save_config({"search_provider": "mojeek", "search_key": "abc123"})
+    warnings = config.config_warnings()
+    assert any("does not read it" in w for w in warnings), warnings
+    # ...and the honest configuration is quiet.
+    config.save_config({"search_provider": "brave"})
+    assert not [w for w in config.config_warnings() if "search" in w]
+
+
+def test_a_provider_that_is_not_a_search_provider_is_refused(temp_db):
+    """`search_provider` was found holding "openai-compatible" — a CHAT
+    provider value, written by an earlier build that rendered both selects
+    from the chat list. The only copy of the valid set lived in controls.js
+    and nothing on this side ever checked."""
+    config.save_config({"search_provider": "brave"})
+    _cfg, warnings = config.save_config(
+        {"search_provider": "openai-compatible"})
+    assert any("is not a search provider" in w for w in warnings), warnings
+    # REFUSED, not folded: the previous choice stands rather than being
+    # silently rewritten to a default the user never picked.
+    assert config.get_config()["search_provider"] == "brave"
+
+
+def test_brave_without_a_key_says_so(temp_db):
+    """The other half of the same silence."""
+    config.save_config({"search_provider": "brave",
+                        "search_key": config.CLEAR_SECRET})
+    assert any("no key is set" in w for w in config.config_warnings())
