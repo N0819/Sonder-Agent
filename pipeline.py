@@ -580,8 +580,11 @@ def run_turn(user_text, session_id=None, run=None):
         if not isinstance(spec, dict):
             continue
         path = str(spec.get("path") or "").strip()
-        if not path or spec.get("contents") is None:
-            warnings.append("dropped an edit with no path or no contents")
+        replace = spec.get("replace")
+        replace = replace if isinstance(replace, list) and replace else None
+        if not path or (spec.get("contents") is None and not replace):
+            warnings.append("dropped an edit with no path, no contents and "
+                            "no replacements")
             continue
         target = spec.get("hypothesis_id")
         if target is None and str(spec.get("fixes") or "").strip() and experiments:
@@ -589,6 +592,7 @@ def run_turn(user_text, session_id=None, run=None):
         try:
             done = coding.apply_edit(
                 path, spec.get("contents"), turn_idx=turn_idx,
+                replace=replace,
                 hypothesis_id=int(target) if target is not None else None,
                 why=str(spec.get("why") or "")[:200], session_id=session_id)
         except Exception as exc:

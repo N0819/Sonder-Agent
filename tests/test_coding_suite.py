@@ -478,3 +478,137 @@ def test_an_edit_cannot_escape_the_workspace(temp_db, tmp_path):
         done = coding.apply_edit(path, "pwned", turn_idx=1)
         assert done["ok"] is False, path
     assert not (tmp_path / "escaped.py").exists()
+
+
+def test_pytest_works_through_the_path_experiments_actually_take(temp_db):
+    """DEAD CODE ON THE LIVE PATH, and the unit tests could not see it.
+
+    `run_pytest` made pytest importable and stamped `harness`, and
+    `coding.run_experiment` calls `sandbox.run` directly — so an experiment
+    that invoked pytest by naming it in `command`, which is the only way the
+    assistant can, got neither. Measured before the fix: "No module named
+    pytest", exit 1, every time; and `_PYTEST_HARNESS_EXITS` unreachable, its
+    own tests passing because they set `harness` themselves.
+
+    Asserted through `sandbox.run` with a model-written argv, never through
+    `run_pytest`, because using the convenience function is precisely what
+    hid this."""
+    argv = [sandbox.sys.executable, "-s", "-m", "pytest", "-q", "--no-header"]
+    passing = sandbox.run({"test_x.py": "def test_a():\n    assert True\n"},
+                          argv)
+    assert passing["harness"] == "pytest"
+    assert passing["exit_code"] == 0, passing["stderr"][:200]
+
+    # ...and with the harness reachable, the exit-code table finally applies
+    # to a run the assistant could actually have written.
+    broken = sandbox.run({"test_x.py": "import nope_not_real\n"}, argv)
+    assert broken["exit_code"] == 2
+    outcome, why = coding.judge(broken, {"exit_zero": True})
+    assert outcome == coding.OUTCOME_INCONCLUSIVE, why
+
+
+def test_an_ordinary_run_is_not_labelled_a_harness(temp_db):
+    """The stamp is keyed on the command, so it has to stay silent for
+    everything that is not a test run — a plain script mislabelled `pytest`
+    would have its exit codes reinterpreted and a real failure graded away."""
+    plain = sandbox.run({"main.py": "import sys; sys.exit(2)"},
+                        [sandbox.sys.executable, "-s", "main.py"])
+    assert plain["harness"] == ""
+    assert coding.judge(plain, {"exit_zero": True})[0] == coding.OUTCOME_REFUTED
+
+
+def test_an_experiment_may_run_the_projects_own_suite(temp_db, tmp_path):
+    """The end the whole chain serves: the assistant verifying with the tests
+    that are already in the repo instead of hand-rolling a harness that
+    reimplements them."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    hyp = research.open_hypothesis("does the helper return 2?", turn_idx=1)
+    out = coding.run_experiment(
+        hyp["id"], source="",
+        files={"lib.py": "def f():\n    return 2\n",
+               "test_lib.py": "from lib import f\n\n"
+                              "def test_f():\n    assert f() == 2\n"},
+        command=[sandbox.sys.executable, "-s", "-m", "pytest", "-q",
+                 "--no-header"],
+        expect={"exit_zero": True, "stdout_has": "1 passed"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+
+
+# ---- An anchored edit, for a file read in pieces ----
+
+def test_an_anchored_edit_changes_only_what_it_names(temp_db, tmp_path):
+    """Whole-file replacement asks the assistant to reproduce every line it is
+    NOT changing, from memory. The failure is a confident-looking rewrite that
+    silently drops one — invisible in a diff summary, invisible in the tests
+    that do not cover it, and indistinguishable afterwards from an intended
+    deletion. An anchor changes what it names and nothing else."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    original = ("import os\n\n\ndef alpha():\n    return 1\n\n\n"
+                "def beta():\n    return 2\n")
+    workspace.store_upload(1, "m.py", original.encode())
+
+    done = coding.apply_edit(
+        "m.py", turn_idx=1,
+        replace=[{"old": "def beta():\n    return 2",
+                  "new": "def beta():\n    return 22"}])
+    assert done["ok"], done
+    after = workspace.read_file("m.py")["text"]
+    assert after == original.replace("return 2\n", "return 22\n")
+    assert "def alpha():\n    return 1" in after, "an untouched line moved"
+
+
+def test_an_anchor_that_is_not_unique_writes_nothing(temp_db, tmp_path):
+    """Zero matches means the anchor is stale and the edit would land
+    somewhere unintended; more than one means the assistant is describing a
+    PATTERN while believing it is naming a PLACE. Both need the count, because
+    "it did not apply" and "it applied three times" want opposite fixes."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    original = "x = 1\ny = 1\nz = 1\n"
+    workspace.store_upload(1, "m.py", original.encode())
+
+    missing = coding.apply_edit("m.py", turn_idx=1,
+                                replace=[{"old": "q = 9", "new": "q = 8"}])
+    assert missing["ok"] is False
+    assert "0 times" in missing["why"]
+    assert "read it again" in missing["why"]
+
+    ambiguous = coding.apply_edit("m.py", turn_idx=1,
+                                  replace=[{"old": "= 1", "new": "= 2"}])
+    assert ambiguous["ok"] is False
+    assert "3 times" in ambiguous["why"]
+    assert "unique" in ambiguous["why"]
+    # Neither attempt touched the file.
+    assert workspace.read_file("m.py")["text"] == original
+
+
+def test_a_failed_anchor_late_in_a_batch_writes_none_of_it(temp_db, tmp_path):
+    """All or nothing. A batch that applied its first two edits and then
+    refused the third would leave the file in a state nobody designed — and
+    the assistant would be told the edit failed while half of it had
+    happened."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    original = "a = 1\nb = 2\nc = 3\n"
+    workspace.store_upload(1, "m.py", original.encode())
+    done = coding.apply_edit("m.py", turn_idx=1, replace=[
+        {"old": "a = 1", "new": "a = 9"},
+        {"old": "b = 2", "new": "b = 9"},
+        {"old": "nonexistent", "new": "boom"}])
+    assert done["ok"] is False
+    assert workspace.read_file("m.py")["text"] == original
+
+
+def test_an_edit_with_neither_contents_nor_replace_is_refused(temp_db,
+                                                              tmp_path):
+    """`contents=None` used to be the only signal, and None is also what an
+    absent key looks like — so a malformed edit would have written an empty
+    file over a real one."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "m.py", b"keep me\n")
+    done = coding.apply_edit("m.py", turn_idx=1)
+    assert done["ok"] is False
+    assert workspace.read_file("m.py")["text"] == "keep me\n"

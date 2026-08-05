@@ -101,8 +101,9 @@ Return ONLY a JSON object:
                   "expect": {{"exit_zero": true, "stdout_has": "..."}},
                   "files": {{"lib.py": "..."}}, "note": "..."}}],
   "propose_fix": {{"hypothesis_id": 1, "description": "..."}},
-  "edit_files": [{{"path": "src/thing.py", "contents": "the WHOLE new file",
-                  "why": "...", "hypothesis_id": 1}}],
+  "edit_files": [{{"path": "src/thing.py", "why": "...", "hypothesis_id": 1,
+                  "replace": [{{"old": "exact text now in the file",
+                               "new": "what replaces it"}}]}}],
   "retire": {{"memory_refs": ["event:...", ...], "reason": "..."}},
   "spawn": [{{"kind": "deep|scout", "task": "...",
               "scope": ["path/it/owns.py"]}}],
@@ -126,6 +127,12 @@ enforces whatever you write:
 Files the user uploaded are already in the sandbox workspace, so you can run
 against them by name; `files_the_user_gave_me` lists what is there.
 
+PYTEST IS AVAILABLE. Name it in `command` — ["python3", "-s", "-m", "pytest",
+"-q", "--no-header"] — and the sandbox makes it importable and reads its exit
+codes properly: 1 means tests ran and failed (a real finding), while 2/3/4/5
+mean the run never reached your hypothesis and settle nothing. Prefer running
+a project's own suite over hand-writing a harness that reimplements it.
+
 `expect` keys, all optional, all checked mechanically — state as many as
 carry real risk of being wrong:
   exit_zero true/false · exit_code 2 · stdout_has · stdout_lacks ·
@@ -136,10 +143,18 @@ the file now reads X" is checkable directly instead of via a print statement.
 A prediction about a file the run never wrote is inconclusive, not refuted.
 
 CHANGING FILES. `edit_files` writes back to the workspace — the only verb
-here that outlives the turn. `contents` is the COMPLETE new file, not a patch
-or a fragment: what you send replaces what is there. Read the file first
-(`need_more.expand_chunks`, or `list_dir` to find it) so you are editing what
-is actually on disk rather than what you remember of it.
+here that outlives the turn. Two modes, and PREFER THE FIRST:
+- `replace`: a list of {{"old", "new"}} pairs. `old` must appear EXACTLY ONCE
+  in the file, copied character for character from something you have read
+  this turn. Nothing is written unless every anchor matches once; you are told
+  the count when one does not. Use this whenever you have read the file in
+  pieces, which is almost always.
+- `contents`: the COMPLETE new file. Only when you have read the whole file
+  this turn, or are creating it. Reproducing from memory the lines you are
+  NOT changing is how a rewrite silently drops one, and a dropped line is
+  indistinguishable afterwards from a deliberate deletion.
+Read before you edit (`need_more.expand_chunks`, or `list_dir` to find it):
+edit what is on disk, not what you remember of it.
 - Name a `hypothesis_id` when the edit FIXES something, and the reproduce-
   before-you-fix gate applies: no observed failure, no edit. Run the
   experiment that reproduces the defect in the same turn and it will be there.

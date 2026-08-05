@@ -250,6 +250,20 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
     interpreter are all RESULTS -- an experiment that blows up is data, and a
     harness that raises on it makes the assistant afraid of its own tools.
     """
+    # PYTEST SUPPORT WAS ATTACHED TO A FUNCTION NOBODY ON THE LIVE PATH
+    # CALLED. `run_pytest` added the interpreter's real site-packages and
+    # stamped the harness — and `coding.run_experiment` calls `run` directly,
+    # so an experiment that invoked pytest by naming it in `command` got
+    # neither. Measured: "No module named pytest", exit 1, every time; and
+    # `_PYTEST_HARNESS_EXITS` unreachable, its unit tests passing only because
+    # they construct the key themselves.
+    #
+    # Folded HERE, where the command is known, rather than left to each
+    # caller to remember (AGENTS.md). `run_pytest` now only builds an argv;
+    # everything that makes pytest work happens once, below.
+    harness = _harness_of(command)
+    if harness == "pytest":
+        import_paths = list(import_paths or []) + _pytest_path()
     workspace = tempfile.mkdtemp(prefix="assistant-exp-")
     try:
         for relative, contents in (files or {}).items():
@@ -276,7 +290,7 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                 return {"ok": False, "exit_code": None, "stdout": "",
                         "stderr": f"could not write {relative!r}: {exc}",
                         "truncated": False, "seconds": 0.0,
-                        "timed_out": False}
+                        "timed_out": False, "harness": harness}
         started = time.perf_counter()
         try:
             proc = subprocess.Popen(
@@ -288,11 +302,13 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
         except FileNotFoundError as missing:
             return {"ok": False, "exit_code": None, "stdout": "",
                     "stderr": f"no such interpreter: {missing}",
-                    "truncated": False, "seconds": 0.0, "timed_out": False}
+                    "truncated": False, "seconds": 0.0, "timed_out": False,
+                    "harness": harness}
         except OSError as exc:
             return {"ok": False, "exit_code": None, "stdout": "",
                     "stderr": f"could not start the command: {exc}",
-                    "truncated": False, "seconds": 0.0, "timed_out": False}
+                    "truncated": False, "seconds": 0.0, "timed_out": False,
+                    "harness": harness}
         out_chunks, err_chunks = [], []
         readers = [
             threading.Thread(target=_drain,
@@ -342,12 +358,13 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                     "stderr": (err
                                + f"\n[timed out after {timeout}s]").strip(),
                     "truncated": True, "seconds": round(elapsed, 3),
-                    "timed_out": True, "files_after": after}
+                    "timed_out": True, "files_after": after,
+                    "harness": harness}
         return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
                 "stdout": out, "stderr": err,
                 "truncated": cut_out or cut_err,
                 "seconds": round(elapsed, 3), "timed_out": False,
-                "files_after": after}
+                "files_after": after, "harness": harness}
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
@@ -390,26 +407,31 @@ def run_pytest(files, *, timeout=DEFAULT_TIMEOUT):
     Tests are the sharpest instrument this module offers, because a test
     states a PREDICTION before it is run -- which is the difference between an
     experiment and a demonstration.
+
+    Nothing but the argv happens here now. Making pytest importable and
+    stamping the harness used to live in this function, which meant they
+    applied only to callers who knew to use it -- and the live experiment path
+    did not. Both moved into `run`, keyed on the command itself.
     """
-    # `-I` implied `-s`, which hides user site-packages -- where pytest
-    # actually lives on an ordinary install. `run_pytest` could not succeed
-    # AT ALL, and "No module named pytest" exits non-zero, so `judge` graded
-    # the sharpest instrument this module offers as a REFUTATION of whatever
-    # hypothesis it was testing. Keeping `-s` (the sandbox must not inherit
-    # the host's user site wholesale) while naming pytest's own directory
-    # explicitly is what makes it importable without reopening that door --
-    # and it has to be named explicitly because HOME points at the
-    # workspace, so the interpreter cannot find the real one by itself.
-    result = run(files, [sys.executable, "-s", "-m", "pytest", "-q",
-                         "--no-header", "-p", "no:cacheprovider"],
-                 timeout=timeout, import_paths=_pytest_path())
-    # STAMPED HERE, WHERE IT IS KNOWN. pytest's exit codes are documented and
-    # exact — 1 means tests failed, 2/3/4 mean the run never got that far —
-    # and `judge` can only use them if it can tell a pytest run from any other
-    # command. Deriving that downstream by pattern-matching the argv is the
-    # guard that gets forgotten; the caller that built the command says so.
-    result["harness"] = "pytest"
-    return result
+    return run(files, [sys.executable, "-s", "-m", "pytest", "-q",
+                       "--no-header", "-p", "no:cacheprovider"],
+               timeout=timeout)
+
+
+def _harness_of(command):
+    """Which known test harness this argv invokes, if any.
+
+    `-m pytest` and a bare `pytest` are the two spellings that reach here. A
+    harness recognised by NAME rather than declared by the caller is what lets
+    a command the model wrote get the same treatment as one this module built
+    -- and the model writes most of them."""
+    argv = [str(a) for a in (command or [])]
+    for i, arg in enumerate(argv):
+        if arg == "-m" and i + 1 < len(argv) and argv[i + 1] == "pytest":
+            return "pytest"
+        if os.path.basename(arg) == "pytest" and i == 0:
+            return "pytest"
+    return ""
 
 
 def _pytest_path():

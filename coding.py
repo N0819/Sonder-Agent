@@ -470,8 +470,46 @@ def _failing_since(hypothesis_id, row_id):
     return False
 
 
-def apply_edit(path, contents, *, turn_idx, hypothesis_id=None, why="",
-               session_id=None):
+def apply_replacements(before, replacements):
+    """Apply anchored old→new substitutions. Returns (text, error).
+
+    THE SAFE WAY TO CHANGE A FILE YOU HAVE ONLY READ IN PIECES. Whole-file
+    replacement asks the assistant to reproduce every line it is NOT changing,
+    from memory, and the failure mode is a confident-looking rewrite that
+    silently drops one — invisible in the diff summary, invisible in the
+    tests that do not cover that line, and indistinguishable from an intended
+    deletion afterwards.
+
+    EXACTLY ONE MATCH, or nothing is written. Zero means the anchor is stale
+    or misremembered and the edit would land somewhere unintended; more than
+    one means the assistant is describing a pattern while believing it is
+    naming a place. Both are refused with the count, because "it did not
+    apply" and "it applied three times" need different corrections.
+
+    Applied in sequence against the accumulating text, so a later anchor may
+    legitimately match something an earlier replacement produced."""
+    text = before
+    for n, item in enumerate(replacements or [], 1):
+        if not isinstance(item, dict):
+            return before, f"replacement {n} is not an object"
+        old = str(item.get("old") or "")
+        if not old:
+            return before, f"replacement {n} has no `old` text to anchor on"
+        found = text.count(old)
+        if found != 1:
+            excerpt = " ".join(old.split())[:80]
+            return before, (
+                f"replacement {n} matched {found} times, not once "
+                f"({excerpt!r}) — "
+                + ("widen it until it is unique"
+                   if found > 1 else
+                   "the file does not contain that text; read it again"))
+        text = text.replace(old, str(item.get("new") or ""), 1)
+    return text, ""
+
+
+def apply_edit(path, contents=None, *, turn_idx, replace=None,
+               hypothesis_id=None, why="", session_id=None):
     """Write a change back to the workspace and return the diff for review.
 
     THE MISSING VERB. Everything else in this module could reproduce a defect,
@@ -500,6 +538,21 @@ def apply_edit(path, contents, *, turn_idx, hypothesis_id=None, why="",
                        "hypothesis — reproduce the defect before editing the "
                        "code that supposedly causes it",
                 "gated_on": hypothesis_id}
+    if replace:
+        # Anchored mode reads the file itself, so the assistant never has to
+        # reproduce the parts it is not changing.
+        current = workspace.read_file(path, session_id)
+        if not current.get("ok"):
+            return {"ok": False, "path": str(path),
+                    "why": current.get("error")
+                           or "cannot anchor an edit in a file I cannot read"}
+        contents, problem = apply_replacements(current["text"], replace)
+        if problem:
+            return {"ok": False, "path": str(path), "why": problem}
+    elif contents is None:
+        return {"ok": False, "path": str(path),
+                "why": "an edit needs either `contents` (the whole new file) "
+                       "or `replace` (anchored old/new pairs)"}
     result = workspace.write_file(path, contents, session_id)
     if not result.get("ok"):
         return {"ok": False, "path": str(path),
