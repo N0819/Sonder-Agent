@@ -271,3 +271,22 @@ def test_an_archive_folder_gives_up_its_prose_and_nothing_else(ws):
     # Withheld, not vanished: the rule is a decision the reader must be able
     # to see, or it is indistinguishable from the file not existing.
     assert "run.json" in snapshot[workspace.WITHHELD_MANIFEST]
+
+
+def test_the_files_a_delivered_suite_needs_to_import_arrive_with_it(ws):
+    """Delivered tests that cannot import are not a delivered suite. The
+    Engine's suite could not be COLLECTED — `RuntimeError: Directory 'static'
+    does not exist`, on every module — because 21 files under `static/` sat at
+    rank 537 of 593 in a newest-first listing and fell past the byte ceiling
+    while 229 test files arrived ahead of them. The failure named the
+    directory, not the budget that lost it."""
+    workspace.store_upload(1, "app.py", b"x" * 4000)
+    root = workspace.session_root(1)
+    os.makedirs(os.path.join(root, "static"), exist_ok=True)
+    with open(os.path.join(root, "static", "index.html"), "w") as fh:
+        fh.write("<!doctype html>")
+    snapshot = workspace.snapshot_for_sandbox(1)
+    assert os.path.join("static", "index.html") in snapshot
+    # The ceiling is the size of the tree, not a round number with headroom:
+    # raising it past this buys nothing, which is why it stops here.
+    assert workspace.SNAPSHOT_MAX_BYTES == 12 << 20

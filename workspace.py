@@ -741,7 +741,22 @@ WITHHELD_MANIFEST = "_withheld_from_this_workspace.md"
 SNAPSHOT_MAX_FILES = 2000
 
 
-def snapshot_for_sandbox(session_id, max_bytes=8 << 20,
+# WHAT THE TREE ACTUALLY WEIGHS, once archives are excluded — not a round
+# number. At 8 MB the Engine's suite could not even be COLLECTED: pytest died
+# on `RuntimeError: Directory 'static' does not exist` for every module,
+# because the 21 files under `static/` sit at rank 537 of 593 in a
+# newest-first listing and fell past the ceiling. Delivered tests that cannot
+# import are not a delivered suite.
+#
+# Measured on the real workspace, two repositories in it: 8 MB gives 403 files
+# and 0 of 21 static; 12 MB gives all 559 and all 21, weighing 10.5 MB; 16 MB
+# gives exactly the same, because the workspace saturates. So this is not a
+# budget with headroom bolted on, it is the size of the thing being copied,
+# and the archive rule above is what keeps raw story data out of it.
+SNAPSHOT_MAX_BYTES = 12 << 20
+
+
+def snapshot_for_sandbox(session_id, max_bytes=SNAPSHOT_MAX_BYTES,
                          max_files=SNAPSHOT_MAX_FILES,
                          binary_max=SNAPSHOT_BINARY_MAX):
     """The workspace as a {relative_path: text-or-bytes} dict `sandbox.run`
