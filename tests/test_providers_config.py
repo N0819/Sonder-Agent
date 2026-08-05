@@ -869,3 +869,40 @@ def test_the_settings_page_cannot_silently_rewrite_a_value_it_cannot_show():
     body = js.split("input.value = out.config[key];", 1)[1][:1200]
     assert "SELECT" in body, "the mismatch has to be detected on selects"
     assert "not a valid choice" in body, "and shown, not silently corrected"
+
+
+def test_the_cli_saying_it_stopped_early_is_not_a_parse_failure(monkeypatch):
+    """`chat_complete` returns the CLI path before it ever reaches the
+    `finish_reason == "length"` branch, so the truncation check existed on the
+    HTTP provider only. On the live provider a run that stopped early came
+    back as ordinary text, failed to parse, and was reported as "respond stage
+    returned unparseable output" — the exact wrong subsystem, named in that
+    branch's own comment, reachable by the path it does not cover."""
+    import providers
+
+    envelope = {"type": "result", "subtype": "error_max_turns",
+                "is_error": False, "result": "{\"reply\": \"half an ans"}
+    monkeypatch.setattr(providers, "_result_envelope", lambda out: envelope)
+
+    class Done:
+        stdout, stderr, returncode = "", "", 0
+
+    with pytest.raises(RuntimeError) as caught:
+        providers._finish_claude_result(Done())
+    assert "stopped early (error_max_turns)" in str(caught.value)
+    # The length of what DID come back is the operator's next clue.
+    assert "22 characters" in str(caught.value)
+
+
+def test_a_successful_cli_result_is_returned_untouched(monkeypatch):
+    """The guard must leave the honest case alone."""
+    import providers
+
+    envelope = {"type": "result", "subtype": "success", "is_error": False,
+                "result": '{"reply": "fine"}'}
+    monkeypatch.setattr(providers, "_result_envelope", lambda out: envelope)
+
+    class Done:
+        stdout, stderr, returncode = "", "", 0
+
+    assert providers._finish_claude_result(Done()) == '{"reply": "fine"}'

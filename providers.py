@@ -589,6 +589,47 @@ def _result_envelope(stdout):
     return None
 
 
+def _finish_claude_result(done):
+    """The CLI's final verdict, as text or as a legible failure.
+
+    EXTRACTED TO BE TESTABLE. Inline in `_claude_code_complete` it could only
+    be exercised by launching the real binary, so the two failure modes below
+    were asserted by nobody — and one of them was missing entirely."""
+    envelope = _result_envelope(done.stdout)
+    if envelope is None:
+        raise RuntimeError(
+            "the Claude Code CLI produced no result event: "
+            + ((done.stderr or "").strip()[:200]
+               or done.stdout.strip()[-300:] or f"exit {done.returncode}"))
+    # `is_error` is the CLI's own verdict and it is NOT the exit code: a "Not
+    # logged in" answer comes back as subtype "success" with is_error true and
+    # the reason in `result`. Surfacing that text is the difference between
+    # "run /login" and a silent dead assistant.
+    if envelope.get("is_error"):
+        raise RuntimeError("the Claude Code CLI reported an error: "
+                           + str(envelope.get("result") or "")[:300])
+    # THE TRUNCATION CHECK EXISTED ON THE OTHER PROVIDER ONLY. `chat_complete`
+    # returns this function before it ever reaches the `finish_reason ==
+    # "length"` branch below, so on the live provider a run that stopped early
+    # came back as ordinary text, failed to parse, and was reported as
+    # "respond stage returned unparseable output" — the exact wrong subsystem,
+    # named in that branch's own comment, reachable by the path it does not
+    # cover. Same fix, same reasoning, one provider over.
+    #
+    # `subtype` is the CLI's own account of why it stopped: "success", or
+    # `error_max_turns` when it exhausts --max-turns mid-answer, or
+    # `error_during_execution`. A non-success subtype with text attached is
+    # still a truncated answer, not an answer.
+    subtype = str(envelope.get("subtype") or "")
+    if subtype and subtype != "success":
+        raise RuntimeError(
+            f"the Claude Code CLI stopped early ({subtype}): the reply and "
+            "every side channel in it were lost. It returned "
+            f"{len(str(envelope.get('result') or '')):,} characters before "
+            "stopping. Shorten the payload, or raise --max-turns.")
+    return str(envelope.get("result") or "")
+
+
 def _claude_code_complete(cfg, system, user):
     binary = str(cfg.get("claude_binary") or "claude").strip() or "claude"
     resolved = shutil.which(binary)
@@ -669,20 +710,8 @@ def _claude_code_complete(cfg, system, user):
         raise RuntimeError(
             "the Claude Code CLI returned nothing: "
             + ((done.stderr or "").strip()[:300] or f"exit {done.returncode}"))
-    envelope = _result_envelope(done.stdout)
-    if envelope is None:
-        raise RuntimeError(
-            "the Claude Code CLI produced no result event: "
-            + ((done.stderr or "").strip()[:200]
-               or done.stdout.strip()[-300:] or f"exit {done.returncode}"))
-    # `is_error` is the CLI's own verdict and it is NOT the exit code: a "Not
-    # logged in" answer comes back as subtype "success" with is_error true and
-    # the reason in `result`. Surfacing that text is the difference between
-    # "run /login" and a silent dead assistant.
-    if envelope.get("is_error"):
-        raise RuntimeError("the Claude Code CLI reported an error: "
-                           + str(envelope.get("result") or "")[:300])
-    return str(envelope.get("result") or "")
+    return _finish_claude_result(done)
+
 
 
 def parse_model_json(raw):
