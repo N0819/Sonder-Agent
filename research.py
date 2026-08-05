@@ -300,7 +300,19 @@ def record_evidence(hid, *, url, title, excerpt, stance, turn_idx,
     # event_key, and the memory row all have to agree about what "the same
     # page" means, and they can only agree if there is one spelling.
     url = canonical_url(url)
-    excerpt = " ".join(str(excerpt or "").split())[:600]
+    # THE EXCERPT SAYS WHEN IT IS A PARTIAL COPY — the same scar as
+    # `source_chars`, one table over, and it cost two turns of an audit before
+    # anyone saw it. An experiment's observation is written through here, so a
+    # long stdout was clipped at 600 characters with nothing anywhere saying
+    # so: the numbers being measured looked complete and were not.
+    #
+    # Marked in the TEXT as well as counted in the column, because the text is
+    # what the model reads back and a column it is never shown cannot warn it.
+    excerpt = " ".join(str(excerpt or "").split())
+    excerpt_chars = len(excerpt)
+    if excerpt_chars > 600:
+        marker = f" …[cut: {excerpt_chars} chars total]"
+        excerpt = excerpt[:600 - len(marker)] + marker
     # Idempotency: the same page cited for the same hypothesis is one row.
     # Without this, a loop that re-fetches a good source pumps confidence by
     # repetition — the popularity loop again, wearing "corroboration".
@@ -328,16 +340,18 @@ def record_evidence(hid, *, url, title, excerpt, stance, turn_idx,
             excerpt = (f"[reading reversed] now {stance}: {excerpt}"
                        f" || previously {prior_stance}: "
                        f"{str(existing['excerpt'] or '')[:200]}")[:600]
-        qi("UPDATE evidence SET excerpt=?, stance=?, title=? WHERE id=?",
-           (excerpt, stance, str(title or "")[:200], existing["id"]))
+        qi("UPDATE evidence SET excerpt=?, excerpt_chars=?, stance=?, "
+           "title=? WHERE id=?",
+           (excerpt, excerpt_chars, stance, str(title or "")[:200],
+            existing["id"]))
         eid = existing["id"]
         fresh = False
     else:
         eid = qi("INSERT INTO evidence(hypothesis_id,url,title,excerpt,"
-                 "stance,event_key,fetched_turn,created) "
-                 "VALUES(?,?,?,?,?,?,?,?)",
-                 (hid, url, str(title or "")[:200], excerpt, stance,
-                  event_key, turn_idx, time.time()))
+                 "excerpt_chars,stance,event_key,fetched_turn,created) "
+                 "VALUES(?,?,?,?,?,?,?,?,?)",
+                 (hid, url, str(title or "")[:200], excerpt, excerpt_chars,
+                  stance, event_key, turn_idx, time.time()))
         fresh = True
     # The memory: provenance `read`, salience from how decisive the stance
     # is. Retrievable forever by the ordinary machinery; this is what lets

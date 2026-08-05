@@ -24,7 +24,7 @@ _lock = threading.Lock()
 # right answer is to queue, not to fail the turn.
 _BUSY_TIMEOUT = float(os.environ.get("ASSISTANT_DB_TIMEOUT", "10"))
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(
@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS evidence(
     url TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
     excerpt TEXT NOT NULL DEFAULT '',
+    -- The true length before truncation. `excerpt` is clipped and the row
+    -- has to say so; 0 means "written before anyone counted", not "empty".
+    excerpt_chars INTEGER NOT NULL DEFAULT 0,
     stance TEXT NOT NULL DEFAULT 'context',
     event_key TEXT NOT NULL DEFAULT '',
     fetched_turn INTEGER NOT NULL DEFAULT 0,
@@ -414,6 +417,24 @@ def _init(conn):
             try:
                 conn.execute("ALTER TABLE experiments "
                              "ADD COLUMN source_chars INTEGER NOT NULL "
+                             "DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass          # already present: a fresh DB built from SCHEMA
+        if version < 6:
+            # THE SAME DEFECT AS v5, ONE TABLE OVER, and it cost real work
+            # before anyone saw it: `excerpt` is clipped to 600 characters
+            # with nothing recording the true length, and an experiment's
+            # observation is written through it. Two turns of an audit were
+            # spent measuring against output that had been silently cut —
+            # the numbers looked complete and were not.
+            #
+            # Same shape of fix as `source_chars` because it is the same
+            # scar: existing rows keep their (partial) excerpt and report 0,
+            # which reads as "unknown" rather than fabricating a length
+            # nobody measured.
+            try:
+                conn.execute("ALTER TABLE evidence "
+                             "ADD COLUMN excerpt_chars INTEGER NOT NULL "
                              "DEFAULT 0")
             except sqlite3.OperationalError:
                 pass          # already present: a fresh DB built from SCHEMA

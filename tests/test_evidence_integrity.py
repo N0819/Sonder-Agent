@@ -9,6 +9,7 @@ import coding
 import memory
 import research
 import tools_web
+from db import q
 
 
 # ---- one page, one spelling ----
@@ -329,3 +330,44 @@ def test_an_explicit_command_still_gets_the_source_under_test(temp_db):
         command=[sys.executable, "-s", "main.py"],
         expect={"stdout_has": "the source under test"}, turn_idx=1)
     assert out["outcome"] == coding.OUTCOME_CONFIRMED
+
+
+def test_a_clipped_excerpt_says_it_was_clipped(temp_db):
+    """THE SAME SCAR AS `source_chars`, ONE TABLE OVER. `excerpt` is stored
+    truncated at 600 characters with nothing recording the true length, and an
+    experiment's observation is written through it — so a long stdout came
+    back looking complete and was not.
+
+    Found by the assistant during a self-audit, at the cost of two turns spent
+    measuring against output that had already been cut. Marked in the TEXT as
+    well as counted in the column, because the text is what gets read back and
+    a column nobody is shown cannot warn anyone."""
+    hyp = research.open_hypothesis("does the long run say everything?", 1)
+    long_observation = "PAIR fires=0 eligible=0 " + ("x" * 2000)
+
+    ev = research.record_evidence(hyp["id"], url="https://example.com/a",
+                                  title="a long run", excerpt=long_observation,
+                                  stance="context", turn_idx=1)
+
+    row = q("SELECT excerpt, excerpt_chars FROM evidence WHERE id=?",
+            (ev["id"] if isinstance(ev, dict) else ev,), one=True)
+    assert row["excerpt_chars"] == len(long_observation)
+    assert "…[cut:" in row["excerpt"], row["excerpt"]
+    assert len(row["excerpt"]) <= 600
+
+
+def test_an_excerpt_that_fits_is_left_alone(temp_db):
+    """The other half. A marker on every row would make the warning
+    meaningless, and `excerpt_chars` has to be the true length rather than a
+    constant — otherwise it says "600" for a 40-character note and the column
+    is no more honest than the silence it replaced."""
+    hyp = research.open_hypothesis("does a short run stay short?", 1)
+
+    ev = research.record_evidence(hyp["id"], url="https://example.com/b",
+                                  title="short", excerpt="exit 0 in 0.1s",
+                                  stance="supports", turn_idx=1)
+
+    row = q("SELECT excerpt, excerpt_chars FROM evidence WHERE id=?",
+            (ev["id"] if isinstance(ev, dict) else ev,), one=True)
+    assert row["excerpt"] == "exit 0 in 0.1s"
+    assert row["excerpt_chars"] == len("exit 0 in 0.1s")
