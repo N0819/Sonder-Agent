@@ -45,6 +45,11 @@ from db import q, qi, state_get, state_put, transaction
 # that started this: the wall is a transport limit and this is a thinking
 # limit, and the thinking limit is the smaller of the two.
 DIGEST_CHAR_BUDGET = 12_000
+# What the digest spends on everything that is not an entry: the pinned
+# summary, the selection note, the not-indexed list and the usage note.
+# Charged against the budget before the entries are filled, so the bound the
+# caller is told is the bound that ships.
+_WRAPPER_RESERVE = 3_000
 GIST_CHARS = 150
 MAX_EXPAND_CHARS = 24_000
 # Below this a "chunk" is noise — a one-line helper on its own row buys an
@@ -610,6 +615,20 @@ def _relevance(query, row):
     return (len(terms & gist) + 2 * len(terms & path)) / (len(terms) + 2.0)
 
 
+def _fit_chars(rows, budget):
+    """As many rows as fit in `budget` characters, with the rest counted."""
+    out, spent = [], 0
+    for row in rows:
+        size = len(json.dumps(row, ensure_ascii=False, default=str))
+        if out and spent + size > budget:
+            out.append({"path": f"…and {len(rows) - len(out)} more",
+                        "why": "not listed: this report has a size budget too"})
+            break
+        out.append(row)
+        spent += size
+    return out
+
+
 def _unwalked_sources(session_id, limit=8):
     """Source files present in the workspace that the index has never seen.
 
@@ -683,6 +702,17 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
         matched = sum(1 for score, _i, _r in scored if score > 0)
         ranked = [r for score, _i, r in scored if score > 0] + \
                  [r for score, _i, r in scored if score <= 0]
+    # THE BUDGET IS THE PAYLOAD'S, NOT THE ENTRY LIST'S. Entries were filled
+    # to exactly `budget` and then the summary, the selection note, the
+    # not-indexed list and the usage note were added on top — a digest that
+    # reported a 12,000-character bound and shipped 18,815. Everything around
+    # the entries is charged first, so the number the caller is given is the
+    # number that arrives.
+    #
+    # Reserved rather than measured exactly: the wrapper cannot be built until
+    # `shown` is known, and `shown` cannot be known until the wrapper is
+    # charged. A fixed reserve breaks that circle in the safe direction.
+    budget = max(1000, budget - _WRAPPER_RESERVE)
     entries, spent, shown = [], 0, 0
     for row in ranked:
         line = {"id": row["chunk_key"], "source": row["source_ref"],
@@ -743,7 +773,17 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
         # disagree — a reader counting entries in this array comes up short.
         # That is the module's own defect reappearing inside the fix for it,
         # which is why it is stated rather than left to be noticed.
-        **({"not_indexed": dropped} if dropped else {}),
+        # BOUNDED IN CHARACTERS LIKE EVERYTHING ELSE HERE. This list was
+        # capped at 40 ENTRIES and sat outside the budget entirely, so a
+        # digest that had trimmed its entries to exactly 12,032 characters
+        # then shipped 5,392 more — 45% on top of a bound the caller was told
+        # was the bound. The module opens by saying a limit on the number of
+        # things says nothing about their size, and then this.
+        #
+        # A share rather than the whole budget: naming what is missing matters,
+        # and it matters less than the map itself.
+        **({"not_indexed": _fit_chars(dropped, budget // 8)}
+           if dropped else {}),
         **({"not_indexed_is_partial":
             f"{len(dropped)} of {index.get('skipped_count')} listed; "
             "read the count, not the length of the list"}

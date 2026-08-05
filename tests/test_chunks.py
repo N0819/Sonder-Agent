@@ -632,3 +632,38 @@ def test_a_deliberate_exclusion_is_not_reported_as_an_unwalked_gap(temp_db,
 
     gaps = [g["path"] for g in chunks._unwalked_sources(1)]
     assert not any("run.json" in p for p in gaps), gaps
+
+
+def test_the_digest_budget_bounds_the_payload_not_just_the_entries(temp_db,
+                                                                   tmp_path):
+    """A STATED BOUND THAT IS 57% WRONG IS WORSE THAN NO BOUND, because the
+    caller sizes a turn payload against it. Entries were filled to exactly the
+    budget and then the summary, the selection note, the not-indexed list and
+    the usage note were added on top: a digest reporting 12,000 characters
+    shipped 18,815, of which 5,392 was a not-indexed list capped at 40 ENTRIES
+    — in a module that opens by saying a limit on the number of things says
+    nothing about their size."""
+    import json
+    import os
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    # Big enough that the entry list SATURATES the budget — a corpus that
+    # fits under it cannot show the overshoot, and a test that cannot fail for
+    # the reason it exists is a comment.
+    for n in range(200):
+        body = "\n".join(
+            "def some_reasonably_named_function_%d_%d():\n"
+            '    """Does a thing."""\n    return %d\n' % (n, k, k)
+            for k in range(3))
+        workspace.store_upload(1, f"module_with_a_longer_name_{n}.py",
+                               body.encode())
+        # Files the index will decline, so `not_indexed` is populated too.
+        workspace.store_upload(1, f"captured_data_blob_{n}.bin", b"\x00" * 10)
+    chunks.ingest_workspace()
+
+    d = chunks.digest(kind="code")
+    payload = len(json.dumps(d, ensure_ascii=False))
+    assert payload <= chunks.DIGEST_CHAR_BUDGET, payload
+    assert d["showing"] > 0, "a budget that shows nothing is not a budget"
+    assert d["total_chunks"] > d["showing"], \
+        "the corpus must exceed the budget or this proves nothing"
