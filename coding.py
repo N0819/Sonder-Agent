@@ -203,6 +203,31 @@ def judge(result, expect):
     # `contradicts` would move confidence on the strength of a missing
     # module. Confined to runs that produced NO stdout, so a program that
     # legitimately prints one of these strings is still judged normally.
+    # A HARNESS THAT DIED AFTER THE PROGRAM SPOKE IS STILL A BROKEN HARNESS.
+    # The guard below is confined to runs that produced NO stdout, so the same
+    # missing import was INCONCLUSIVE when the program was silent and a
+    # REFUTATION when it had printed one line first: same broken tool,
+    # opposite verdict, decided by whether the program happened to speak.
+    # Confidence moved down and the reproduce-before-you-fix gate swung open,
+    # on a tooling failure.
+    #
+    # Separated by STREAM rather than by emptiness. The tooling complains on
+    # stderr and complains LAST, so only the final non-empty stderr line is
+    # scanned, and only when the run actually exited non-zero. The case the
+    # guard below protects survives by construction: a test asserting on the
+    # text "no such file or directory" prints it to STDOUT and never reaches
+    # here, and a program that merely mentions a cue mid-stderr is judged on
+    # its merits. Residual, stated rather than hidden: a failing program whose
+    # own last stderr line ends with a cue phrase is still misgraded, and
+    # closing that needs the sandbox to say which side wrote the failure.
+    stderr_lines = [ln for ln in (result.get("stderr") or "").splitlines()
+                    if ln.strip()]
+    if stderr_lines and result.get("exit_code") not in (0, None):
+        if any(cue in stderr_lines[-1].lower()
+               for cue in _HARNESS_FAILURE_CUES):
+            return (OUTCOME_INCONCLUSIVE,
+                    "the harness failed before the hypothesis was tested: "
+                    + stderr_lines[-1].strip()[:160])
     stderr_low = (result.get("stderr") or "").lower()
     if (not result.get("ok") and not (result.get("stdout") or "").strip()
             and any(cue in stderr_low for cue in _HARNESS_FAILURE_CUES)):

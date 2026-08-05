@@ -612,3 +612,38 @@ def test_an_edit_with_neither_contents_nor_replace_is_refused(temp_db,
     done = coding.apply_edit("m.py", turn_idx=1)
     assert done["ok"] is False
     assert workspace.read_file("m.py")["text"] == "keep me\n"
+
+
+def test_a_harness_that_died_after_the_program_spoke_settles_nothing(temp_db):
+    """THE SAME BROKEN TOOL, GRADED TWO WAYS. The cue scan was confined to
+    runs that produced no stdout, so a missing import was INCONCLUSIVE when
+    the program was silent and a REFUTATION when it had printed one line
+    first — confidence down and the fix gate open, on a tooling failure."""
+    result = {"ok": False, "exit_code": 1, "stdout": "checking widget\n",
+              "stderr": "Traceback (most recent call last):\n"
+                        "    import widget\n"
+                        "ModuleNotFoundError: No module named 'widget'\n",
+              "timed_out": False}
+
+    outcome, why = coding.judge(result, {"exit_zero": True,
+                                         "stdout_has": "checking widget"})
+
+    assert outcome == coding.OUTCOME_INCONCLUSIVE, why
+    assert "harness" in why
+
+
+def test_a_program_that_prints_a_cue_string_is_still_judged_on_its_merits(
+        temp_db):
+    """THE CASE THE OLD GUARD PROTECTED, and the reason the fix separates the
+    streams instead of widening the scan: a test asserting on the text "no
+    such file or directory" prints it to STDOUT, so it never reaches a
+    stderr-scoped guard and needs no second special case."""
+    passing = {"ok": True, "exit_code": 0,
+               "stdout": "no such file or directory\n", "stderr": "",
+               "timed_out": False}
+    failing = dict(passing, ok=False, exit_code=1)
+
+    assert (coding.judge(passing, {"exit_zero": True})[0]
+            == coding.OUTCOME_CONFIRMED)
+    assert (coding.judge(failing, {"exit_zero": True})[0]
+            == coding.OUTCOME_REFUTED)
