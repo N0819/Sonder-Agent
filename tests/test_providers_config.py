@@ -659,3 +659,30 @@ def test_the_partial_message_flag_is_actually_requested(temp_db, monkeypatch):
     providers._claude_code_complete({"claude_binary": "claude"}, "s", "u")
     assert "--include-partial-messages" in seen["argv"]
     assert "stream-json" in seen["argv"]
+
+
+def test_no_stage_gets_a_smaller_output_ceiling_than_the_default():
+    """A CEILING NOBODY CHOSE COST A WHOLE TURN. `chat_complete` defaulted to
+    max_tokens=2000, and the Claude Code CLI path ignores the argument
+    entirely — so for as long as the CLI was the provider the default was
+    never exercised, and the first HTTP provider configured lost a turn to it.
+    The respond stage, which emits the largest output of any stage (the reply
+    plus every side channel), was the one call site that never overrode it,
+    while consolidation and subagent reports both did.
+
+    Output tokens are billed as generated rather than as budgeted, so a stage
+    pinning a LOWER ceiling than the default is buying nothing and risking the
+    same silent loss. Structural rather than behavioural on purpose: the
+    failure is a call site that forgot, and only reading the call sites
+    catches that."""
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    pinned = []
+    for path in sorted(root.glob("*.py")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for found in re.finditer(r"max_tokens\s*=\s*(\d+)", line):
+                pinned.append((path.name, n, int(found.group(1))))
+    too_small = [p for p in pinned if p[2] < providers.DEFAULT_MAX_TOKENS]
+    assert not too_small, f"ceiling below the default: {too_small}"
+    assert providers.DEFAULT_MAX_TOKENS >= 8000

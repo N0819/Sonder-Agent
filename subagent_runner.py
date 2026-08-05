@@ -241,7 +241,7 @@ def main():
     try:
         raw = chat_complete(prompts.render(prompts.SUBAGENT_REPORT_SYSTEM),
                             json.dumps(payload, ensure_ascii=False),
-                            temperature=0.1, max_tokens=3000)
+                            temperature=0.1)
         report = parse_model_json(raw)
     except Exception as exc:
         report = None

@@ -1078,7 +1078,7 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
 def _llm_consolidator(payload):
     raw = chat_complete(prompts.render(prompts.CONSOLIDATE_SYSTEM),
                         json.dumps(payload, ensure_ascii=False),
-                        temperature=0.1, max_tokens=3000)
+                        temperature=0.1)
     out = parse_model_json(raw)
     if out is None:
         raise RuntimeError("consolidator returned invalid JSON")

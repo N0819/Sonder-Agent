@@ -162,7 +162,20 @@ def chat_configured():
     return bool(cfg["chat_base"] and cfg["chat_model"])
 
 
-def chat_complete(system, user, *, temperature=0.4, max_tokens=2000):
+# GENEROUS BY DEFAULT, BECAUSE THE CEILING IS FREE UNTIL IT IS HIT AND THE
+# WHOLE TURN WHEN IT IS. This was 2000, and the Claude Code CLI path ignores
+# it entirely — so the default was never exercised for as long as the CLI was
+# the provider, and the first HTTP provider to be configured lost a turn to a
+# number nobody had chosen for it. A ceiling that must be overridden at each
+# call site to be safe is a guard that must be remembered; the respond stage,
+# which emits the largest output of any stage, was the one call site that
+# never overrode it. Output tokens are billed as generated, not as budgeted,
+# so a high ceiling costs nothing until it is needed.
+DEFAULT_MAX_TOKENS = 8000
+
+
+def chat_complete(system, user, *, temperature=0.4,
+                  max_tokens=DEFAULT_MAX_TOKENS):
     """One chat completion. Raises RuntimeError with a legible reason when no
     provider is configured — the caller decides how to surface that; nothing
     here fabricates a reply."""
