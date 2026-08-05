@@ -817,6 +817,20 @@ def snapshot_for_sandbox(session_id, max_bytes=SNAPSHOT_MAX_BYTES,
         except OSError as exc:
             withheld.append((path, f"could not be read: {exc.strerror}"))
             continue
+        # HALF A FILE IS NOT A SMALL FILE. The read above asks for one byte
+        # more than the budget has left, so an over-long file comes back
+        # over-long and is named here — it never arrives as a shorter version
+        # of itself. The `continue` above only catches files reached AFTER
+        # the budget ran out; the one file straddling the line was still cut
+        # mid-expression and delivered silently. A subagent parsed such a cut
+        # and recorded `SyntaxError: '(' was never closed, line 375` against
+        # tests/test_pipeline_safety.py as a property of the shipped tree.
+        # The file is 392 lines and parses. Nothing downstream can tell a
+        # truncated source from a broken one, so the truncation cannot exist.
+        if len(raw) > max_bytes - total:
+            withheld.append((path, "would not fit in what was left of the "
+                                   "total size budget"))
+            continue
         binary = b"\x00" in raw[:8192]
         if not binary:
             try:

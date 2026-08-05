@@ -159,6 +159,28 @@ def test_a_binary_too_large_to_carry_is_named_rather_than_dropped(ws):
     assert "huge.db" in snapshot[workspace.WITHHELD_MANIFEST]
 
 
+def test_the_file_that_straddles_the_budget_is_named_not_cut(ws):
+    """The subagent's audit recorded `SyntaxError: '(' was never closed,
+    line 375` against tests/test_pipeline_safety.py and filed it as a property
+    of the shipped tree — the one finding it later argued truncation *could
+    not* have caused, on the reasoning that truncation drops whole files. It
+    did not: the read asked for exactly the remaining budget, so the file
+    lying across the ceiling arrived as a shorter version of itself with
+    nothing said. The file is 392 lines and parses clean. A cut source is
+    indistinguishable downstream from a broken one."""
+    workspace.store_upload(1, "small.py", b"x = 1\n")
+    workspace.store_upload(1, "big.py", b"def f(\n" + b"    1,\n" * 500 + b"): pass\n")
+    big = workspace.list_files(1)
+    on_disk = {e["path"]: e["bytes"] for e in big}
+    snapshot = workspace.snapshot_for_sandbox(1, max_bytes=200)
+    assert "big.py" not in snapshot, "half a file is not a small file"
+    assert "big.py" in snapshot[workspace.WITHHELD_MANIFEST]
+    for path, body in snapshot.items():
+        if path == workspace.WITHHELD_MANIFEST:
+            continue
+        assert len(body.encode()) == on_disk[path], f"{path} arrived cut"
+
+
 def test_the_workspace_says_what_it_could_not_bring(ws):
     """A deep subagent was handed a 591-file tree, received the 200 newest,
     walked what it had, and reported that the project HAS NO TEST SUITE —
