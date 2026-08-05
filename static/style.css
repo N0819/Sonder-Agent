@@ -120,6 +120,18 @@ button.danger { background: #3b2530; color: #f7768e; }
   font-size: .78rem; color: #77808c; cursor: pointer; }
 #autowrap input { cursor: pointer; }
 #running-hint { margin-top: .35rem; font-size: .75rem; color: #6b7480; }
+
+/* A step that just landed. Brief, and only on arrival — the point is to make
+   a new line noticeable in a list that is already several lines long, not to
+   decorate the panel. */
+@keyframes step-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: none; }
+}
+.reasoning-step.arriving { animation: step-in .18s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-step.arriving { animation: none; }
+}
 .reasoning-step .step-head { cursor: default; }
 .reasoning-step .step-head.expandable { cursor: pointer; }
 .reasoning-step .step-head.expandable:hover { color: #b9c2cf; }

@@ -647,3 +647,35 @@ def test_a_program_that_prints_a_cue_string_is_still_judged_on_its_merits(
             == coding.OUTCOME_CONFIRMED)
     assert (coding.judge(failing, {"exit_zero": True})[0]
             == coding.OUTCOME_REFUTED)
+
+
+def test_an_experiment_can_ask_for_the_time_its_suite_needs(temp_db):
+    """A CEILING THAT FORCES A WEAKER QUESTION. 20s is a sound default and was
+    also the maximum, with no way for a spec to raise it — and this project's
+    own suite takes ~34s, so "run your tests and show me they are green" was
+    unreachable through the one verb that can run them.
+
+    Measured on a live audit: two experiments timed out at 20.0s and the
+    assistant fell back to `-x`, which stops at the first failure and so can
+    report that something is broken but never that everything passes."""
+    slow = "import time\ntime.sleep(2.5)\nprint('finished')\n"
+    assert sandbox.run({"main.py": slow},
+                       [sandbox.sys.executable, "-s", "main.py"],
+                       timeout=1.0)["timed_out"] is True
+
+    out = sandbox.run({"main.py": slow},
+                      [sandbox.sys.executable, "-s", "main.py"], timeout=30.0)
+    assert out["timed_out"] is False
+    assert "finished" in out["stdout"]
+
+
+def test_the_ceiling_is_applied_where_it_cannot_be_forgotten(temp_db):
+    """Clamped inside `run`, not at each caller. A guard every caller must
+    remember to apply is one the next caller will omit — and the omission
+    would be a sandbox with no upper bound at all, which is the failure this
+    limit exists to prevent."""
+    out = sandbox.run({"main.py": "print('hi')\n"},
+                      [sandbox.sys.executable, "-s", "main.py"],
+                      timeout=10_000)
+    assert out["ok"] is True
+    assert sandbox.MAX_TIMEOUT < 10_000

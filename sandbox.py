@@ -57,6 +57,14 @@ except ImportError:                                   # non-POSIX
 # Long enough for a real test run, short enough that a loop is caught while
 # the user is still watching.
 DEFAULT_TIMEOUT = 20.0
+# The most an experiment may ask for. 20s is the right DEFAULT — a runaway
+# loop should die quickly — but it was also the ceiling, and the ceiling was
+# measured wrong: this project's own suite takes ~34s, so "run your tests and
+# show me they pass" was unreachable through the one verb that can run them.
+# The assistant hit it twice in one audit and worked around it with `-x`,
+# which stops at the first failure and therefore cannot answer "is the suite
+# green". A limit that forces a weaker question is a limit set too low.
+MAX_TIMEOUT = 180.0
 # Per stream. A truncated tail is more useful than a truncated head: the
 # traceback is at the end.
 MAX_OUTPUT = 20_000
@@ -261,6 +269,13 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
     # Folded HERE, where the command is known, rather than left to each
     # caller to remember (AGENTS.md). `run_pytest` now only builds an argv;
     # everything that makes pytest work happens once, below.
+    # Clamped HERE rather than at each caller, so the ceiling cannot be
+    # bypassed by a caller who forgets it and cannot be forgotten by one who
+    # should apply it (AGENTS.md: a guard that must be remembered will be
+    # forgotten). A request above the ceiling is silently lowered rather than
+    # refused — the run still happens, and the timeout it gets is reported in
+    # `seconds` either way.
+    timeout = max(1.0, min(float(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     harness = _harness_of(command)
     if harness == "pytest":
         import_paths = list(import_paths or []) + _pytest_path()

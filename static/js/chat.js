@@ -147,6 +147,38 @@ function reasoningLine(ev) {
       + '\n   ' + ev.chunks + ' chunks located';
   }
   if (ev.stage === 'stream') return null;   // rendered live, not as a step
+  if (ev.stage === 'experiment') {
+    // The prediction is shown BEFORE the run and the verdict after, as two
+    // steps. That ordering is the discipline made visible: `expect` was
+    // written before anything executed, and a panel that only ever showed the
+    // verdict could not tell that apart from a result narrated afterwards.
+    if (ev.state === 'running') {
+      let text = 'experiment running — ' + ev.hypothesis;
+      text += '\n   predicted: ' + ev.predicted;
+      if (ev.command) text += '\n   ' + ev.command;
+      text += '\n   up to ' + ev.timeout + 's';
+      return text;
+    }
+    let text = 'experiment ' + ev.state + ' — ' + ev.hypothesis;
+    text += '\n   ' + ev.why;
+    if (ev.timed_out) {
+      text += '\n   TIMED OUT after ' + ev.seconds + 's — it never finished, '
+        + 'which is not the same as failing';
+    } else if (ev.exit_code !== undefined && ev.exit_code !== null) {
+      text += '\n   exit ' + ev.exit_code + ' in ' + ev.seconds + 's';
+    }
+    if (ev.repeated) {
+      text += '\n   DISAGREED WITH ITS EARLIER RUN — recorded as a dispute, '
+        + 'not averaged';
+    }
+    if (ev.stdout) text += '\n   stdout: ' + ev.stdout;
+    if (ev.stderr) text += '\n   stderr: ' + ev.stderr;
+    return text;
+  }
+  if (ev.stage === 'fix') {
+    return 'proposed fix ' + ev.state + ' — ' + ev.description
+      + '\n   ' + ev.why;
+  }
   if (ev.stage === 'iteration') {
     return 'iteration ' + ev.n + ' — '
       + (ev.source === 'user' ? 'you asked' : 'it decided to carry on')
@@ -202,15 +234,29 @@ function reasoningStep(ev, line) {
   return row;
 }
 
+// OPEN WHILE IT RUNS, FOLDED ONCE IT IS DONE.
+//
+// Collapsed-by-default was right when the panel was a record to consult after
+// the fact. It is wrong while the turn is in flight: what the user gets is a
+// step COUNTER — "(7 steps)" — which says work is happening but not what, and
+// a number ticking up feels like a progress bar, not like watching something
+// think. The steps were always being delivered; they were just behind a
+// click nobody makes mid-turn.
+//
+// Folding on completion rather than leaving it open, because the value
+// inverts the moment the turn ends: a finished turn's trail is reference, and
+// twenty of them stacked in the log buries the answers between them.
 function makeReasoningPanel() {
   const wrap = el('<div class="reasoning"></div>');
   const toggle = el('<button type="button" class="reasoning-toggle">'
-                    + 'Show reasoning ▸</button>');
+                    + 'Hide reasoning ▾</button>');
   const body = el('<div class="reasoning-body"></div>');
-  body.style.display = 'none';
   toggle.addEventListener('click', function () {
     const open = body.style.display !== 'none';
     body.style.display = open ? 'none' : 'block';
+    // Once the user has taken a side, stop overriding it. Auto-folding a
+    // panel someone deliberately opened is the interface arguing with them.
+    wrap.dataset.pinned = '1';
     toggle.textContent = open ? 'Show reasoning ▸' : 'Hide reasoning ▾';
   });
   wrap.appendChild(toggle);
@@ -489,6 +535,13 @@ async function watchExisting(runId, text) {
         src.close();
         forgetRun();
         pending.remove();
+        // Fold the trail now the turn is over — unless the user opened or
+        // closed it themselves, in which case that decision stands.
+        if (!panel.wrap.dataset.pinned) {
+          panel.body.style.display = 'none';
+          panel.toggle.textContent = 'Show reasoning ▸ ('
+            + steps + ' steps)';
+        }
         const out = ev.result || {};
         if (ev.status === 'halted') {
           const node = addMsg('meta', 'Halted. Nothing was committed \u2014 '
@@ -537,13 +590,23 @@ async function watchExisting(runId, text) {
       const line = reasoningLine(ev);
       if (line === null) return;
       steps += 1;
-      panel.body.appendChild(reasoningStep(ev, line));
+      const row = reasoningStep(ev, line);
+      row.classList.add('arriving');
+      panel.body.appendChild(row);
       // The live view is the point: show the newest step in the collapsed
       // state too, so a running turn is legible without opening anything.
       panel.toggle.textContent =
         (panel.body.style.display === 'none' ? 'Show reasoning \u25b8 '
                                              : 'Hide reasoning \u25be ')
         + '(' + steps + ' steps)';
+      // FOLLOW THE WORK, BUT NOT OVER THE USER'S SHOULDER. Scrolling on every
+      // step would fight anyone who has scrolled up to read an earlier one \u2014
+      // so it only follows when they are already at the bottom, which is
+      // where "watching it work" actually happens.
+      const log = document.getElementById('log');
+      if (log.scrollHeight - log.scrollTop - log.clientHeight < 120) {
+        log.scrollTop = log.scrollHeight;
+      }
     };
     // HOLD, DO NOT GIVE UP. This used to close the stream and offer a retry
     // \u2014 which threw away a turn that was still running on the server and,

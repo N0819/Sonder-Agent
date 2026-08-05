@@ -33,6 +33,7 @@ import persona
 import prompts
 import chunks
 import research
+import sandbox
 import subagents
 import tools_web
 import turnrun
@@ -637,15 +638,45 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
         files.update({str(k): str(v)
                       for k, v in (spec.get("files") or {}).items()
                       if isinstance(spec.get("files"), dict)})
+        # THE MOST INTERESTING THING A TURN DOES, AND IT RAN SILENTLY. The
+        # stage emitted nothing at all: a suite run holds the turn for up to
+        # three minutes with no step in the panel, which is the same "is it
+        # working or is it hung" ambiguity the streaming work removed from the
+        # respond stage — reintroduced at the one stage where the answer takes
+        # longest.
+        #
+        # Announced BEFORE the run, carrying the prediction. That ordering is
+        # the discipline made visible: `expect` was written before anything
+        # executed, and a panel that only ever showed the verdict could not
+        # tell that apart from a result narrated afterwards.
+        run.emit("experiment", state="running", hypothesis=question[:200],
+                 predicted=json.dumps(spec.get("expect") or {},
+                                      ensure_ascii=False)[:300],
+                 command=" ".join(str(c) for c in (command or []))[:200],
+                 timeout=spec.get("timeout") or sandbox.DEFAULT_TIMEOUT)
         try:
             outcome = coding.run_experiment(
                 hyp["id"], source=source, expect=spec.get("expect"),
                 turn_idx=turn_idx, files=files,
-                command=command,
+                command=command, timeout=spec.get("timeout"),
                 note=str(spec.get("note") or "")[:200])
         except Exception as exc:
+            run.emit("experiment", state="the harness itself failed",
+                     hypothesis=question[:200], detail=str(exc)[:200])
             warnings.append(f"experiment harness failed: {str(exc)[:200]}")
             continue
+        # The verdict, with what was actually observed beside it. `why` is the
+        # grader's sentence — which predicate failed, or which harness cue
+        # fired — and without it "refuted" is a label the panel cannot justify.
+        result = outcome.get("result") or {}
+        run.emit("experiment", state=outcome["outcome"],
+                 hypothesis=question[:200], why=outcome["why"][:300],
+                 exit_code=result.get("exit_code"),
+                 seconds=result.get("seconds"),
+                 timed_out=bool(result.get("timed_out")),
+                 stdout=(result.get("stdout") or "")[-600:],
+                 stderr=(result.get("stderr") or "")[-600:],
+                 repeated=outcome["repeated"])
         experiments.append({"hypothesis_id": hyp["id"],
                             "question": question[:120],
                             "outcome": outcome["outcome"],
@@ -667,6 +698,13 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                 int(target), description=str(fix["description"]),
                 turn_idx=turn_idx)
             trace["proposed_fix"] = verdict
+            # The gate is the point of the module, and it was invisible. A
+            # refusal is not an error — it is the mechanism working — so it
+            # belongs in the trail beside the run that failed to justify it.
+            run.emit("fix", state=("accepted" if verdict["accepted"]
+                                   else "refused"),
+                     why=str(verdict.get("why") or "")[:300],
+                     description=str(fix["description"])[:200])
             if not verdict["accepted"]:
                 warnings.append(f"fix refused: {verdict['why']}")
     if experiments:

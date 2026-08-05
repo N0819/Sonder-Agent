@@ -107,7 +107,7 @@ Return ONLY a JSON object:
                   "source": "the python to run — OR omit it and give `command`",
                   "command": ["python3", "-m", "pytest", "tests/", "-q"],
                   "expect": {{"exit_zero": true, "stdout_has": "..."}},
-                  "files": {{"lib.py": "..."}}, "note": "..."}}],
+                  "files": {{"lib.py": "..."}}, "timeout": 120, "note": "..."}}],
   "propose_fix": {{"hypothesis_id": 1, "description": "..."}},
   "edit_files": [{{"path": "src/thing.py", "why": "...", "hypothesis_id": 1,
                   "replace": [{{"old": "exact text now in the file",
@@ -182,6 +182,13 @@ PYTEST IS AVAILABLE. Name it in `command` — ["python3", "-s", "-m", "pytest",
 codes properly: 1 means tests ran and failed (a real finding), while 2/3/4/5
 mean the run never reached your hypothesis and settle nothing. Prefer running
 a project's own suite over hand-writing a harness that reimplements it.
+
+A run gets 20 seconds unless you ask for more. `timeout` takes up to 180, and
+a whole suite usually needs it — ask for the time rather than narrowing the
+question to fit. `-x` stops at the first failure, so it can tell you something
+is broken but never that the suite is green; use it to investigate, not to
+conclude. A timeout comes back as `timed_out`, which is "it never finished",
+not "it failed" — those are different findings and neither settles the other.
 
 `expect` keys, all optional, all checked mechanically — state as many as
 carry real risk of being wrong:
