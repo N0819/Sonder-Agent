@@ -715,3 +715,29 @@ def test_a_replacement_that_produces_the_original_text_is_refused(temp_db,
                              replace=[{"old": "a = 1", "new": "a = 1"}])
     assert done["ok"] is False
     assert workspace.read_file("m.py")["text"] == "a = 1\n"
+
+
+def test_a_binary_in_the_workspace_does_not_break_the_experiment(temp_db):
+    """The workspace could not carry a SQLite database, so "run this project's
+    suite" failed at the first query on any project that keeps state on disk.
+    Once it could, `_digest` — the identity function, several frames below the
+    caller — raised `Object of type bytes is not JSON serializable`, and the
+    experiment never ran at all. The turn reported `experiment harness failed`
+    and named neither the file nor the stage."""
+    hyp = research.open_hypothesis("does the binary reach the sandbox?", 1)
+    out = coding.run_experiment(
+        hyp["id"],
+        source="import os\nprint('SIZE', os.path.getsize('state.db'))",
+        files={"state.db": b"SQLite format 3\x00\x01\x02"},
+        expect={"output_equals": "SIZE 18"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+
+
+def test_two_different_databases_are_two_different_experiments(temp_db):
+    """A binary belongs in the experiment's identity for the same reason
+    `{"lib.py": "V=1"}` and `{"lib.py": "V=2"}` do: collapsing them makes one
+    run's outcome look like the other's non-determinism, which manufactures a
+    dispute out of nothing."""
+    first = coding._digest(1, "x", ["python3"], {}, {"a.db": b"\x00one"})
+    second = coding._digest(1, "x", ["python3"], {}, {"a.db": b"\x00two"})
+    assert first != second

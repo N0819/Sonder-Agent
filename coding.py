@@ -79,8 +79,25 @@ def _digest(hypothesis_id, source, command, expect=None, files=None):
     payload = "|".join((
         str(hypothesis_id), source or "", json.dumps(command),
         json.dumps(expect or {}, sort_keys=True),
-        json.dumps(sorted((files or {}).items()))))
+        json.dumps(sorted((path, _identity_of(body))
+                          for path, body in (files or {}).items()))))
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
+
+
+def _identity_of(body):
+    """A file's contribution to the digest.
+
+    A binary is hashed rather than carried: it belongs in the identity — two
+    runs against different databases are different experiments — but a 2 MB
+    database inlined into the string that is then hashed is 2 MB of work per
+    digest, and `sorted()` would be comparing bytes against str the moment a
+    workspace holds both. Once the workspace could carry a SQLite file at all,
+    `json.dumps` on the raw dict raised `Object of type bytes is not JSON
+    serializable` — out of the identity function, so the experiment never ran
+    and the failure named the harness rather than the file that caused it."""
+    if isinstance(body, (bytes, bytearray)):
+        return "sha1:" + hashlib.sha1(bytes(body)).hexdigest()
+    return body
 
 
 # stderr shapes that mean THE HARNESS broke, not the hypothesis. Rule 4 says
