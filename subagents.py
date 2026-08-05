@@ -900,7 +900,7 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
     search, web fetch, and text it was already given. Nothing it returns is
     written anywhere by this function — the caller decides, after
     validation."""
-    gathered, seen = [], []
+    gathered, seen, search_note = [], [], ""
     # A scout sent at a codebase gets the map AND a way to open it.
     #
     # It used to get `codemap_for` and nothing else, which is a list of names
@@ -936,6 +936,11 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
             "code_you_have_read": read_chunks,
             "pages_read_so_far": gathered,
             "search_results": seen,
+            # WHY it is empty, in the payload the scout actually reads. A
+            # scout told only "no results" rephrases and searches again —
+            # the one move that cannot help a blocked backend — and then
+            # reports to its parent that the web has nothing on the subject.
+            **({"search_unavailable": search_note} if search_note else {}),
             "rounds_left": SCOUT_MAX_ROUNDS - _round,
         }
         action = parse_model_json(chat_complete(
@@ -962,8 +967,15 @@ def _run_scout(task, *, session_id=None, context="", turn_idx=0):
                             for p in read_chunks[-len(got or []):]
                             if p.get("text"))
         elif name == "search":
-            seen = tools_web.search(str(action.get("query") or task),
-                                    max_results=5)
+            # A scout that cannot tell a dead lane from a quiet one reports
+            # "nothing found" about the web, and its parent banks that as
+            # testimony. Same seam as the research loop and the turn payload.
+            found = tools_web.search_detail(
+                str(action.get("query") or task), max_results=5)
+            seen = found["results"]
+            search_note = (found["detail"][:200]
+                           if not seen
+                           and found["status"] in ("blocked", "error") else "")
         elif name == "fetch":
             page = tools_web.fetch(str(action.get("url") or ""))
             excerpt = (str(action.get("excerpt") or "").strip()

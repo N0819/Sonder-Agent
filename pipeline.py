@@ -349,15 +349,35 @@ def _gather(more, turn_idx, session_id, run, warnings):
     search_query = str(more.get("search") or "").strip()
     if search_query:
         run.emit("search", query=search_query)
+        # `search_detail`, NOT `search`. The collapsing version reports a
+        # blocked backend as `nothing_found`, which is the exact defect that
+        # function was written to end — fixed in the research loop and left
+        # standing here, the lane the assistant reaches for most. Measured
+        # against the live backend: `BBC News` returns 5 results while
+        # `AI therapy chatbot randomized` is served an anti-bot challenge,
+        # deterministically, four attempts apart. So a control query PROVES
+        # THE LANE WORKS while the real question is silently refused, and the
+        # assistant spent six searches across two agents concluding the web
+        # had nothing to say.
+        detail = {"results": [], "status": "error", "detail": ""}
         try:
-            results = tools_web.search(search_query,
-                                       max_results=PONDER_SEARCH_RESULTS)
+            detail = tools_web.search_detail(
+                search_query, max_results=PONDER_SEARCH_RESULTS)
         except Exception as exc:
-            warnings.append(f"web search failed: {str(exc)[:120]}")
-            results = []
+            detail["detail"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        results = detail["results"]
         step["search"] = {"query": search_query, "results": results,
-                          **({"nothing_found": True} if not results else {})}
-        run.emit("search", query=search_query, results=len(results))
+                          "status": detail["status"],
+                          **({"unavailable": detail["detail"]}
+                             if detail["status"] in ("blocked", "error")
+                             else {}),
+                          **({"nothing_found": True}
+                             if not results and detail["status"] == "empty"
+                             else {})}
+        if detail["status"] in ("blocked", "error"):
+            warnings.append(f"search unavailable: {detail['detail'][:160]}")
+        run.emit("search", query=search_query, results=len(results),
+                 status=detail["status"], detail=detail["detail"][:200])
     return step, delivered
 
 

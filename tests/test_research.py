@@ -377,3 +377,49 @@ def test_the_backend_the_module_promised_can_actually_be_swapped():
         assert tools_web.search("anything")[0]["url"] == "https://e.com"
     finally:
         tools_web.set_search_backend(None)
+
+
+def test_the_turn_payload_says_a_blocked_lane_is_blocked(temp_db, monkeypatch):
+    """`search_detail` was written to end "search returned nothing" standing in
+    for a dead backend, and it was wired into the research loop and left out of
+    the two lanes the assistant reaches for most. Measured against the live
+    backend on turn 113: `BBC News` returns 5 results while
+    `AI therapy chatbot randomized` is served an anti-bot challenge,
+    deterministically, four attempts 15s apart. So a control query PROVES the
+    lane works while the real question is silently refused — and the assistant
+    reported six searches across two agents as the web having nothing to say,
+    then answered from training instead."""
+    import pipeline
+    import tools_web
+
+    monkeypatch.setattr(tools_web, "search_detail",
+                        lambda q, max_results=5: {
+                            "results": [], "status": "blocked",
+                            "detail": "served an anti-bot challenge"})
+    warnings = []
+    step, _delivered = pipeline._gather(
+        {"search": "AI therapy chatbot randomized"}, 1, None,
+        pipeline._UNOBSERVED, warnings)
+    assert step["search"]["status"] == "blocked"
+    # `nothing_found` is a claim about the WEB. It must not be made on behalf
+    # of a backend that refused to answer.
+    assert "nothing_found" not in step["search"]
+    assert "anti-bot" in step["search"]["unavailable"]
+    assert any("search unavailable" in w for w in warnings)
+
+
+def test_an_empty_result_is_still_reported_as_nothing_found(temp_db,
+                                                            monkeypatch):
+    """The honest case has to keep working, or the distinction is worthless."""
+    import pipeline
+    import tools_web
+
+    monkeypatch.setattr(tools_web, "search_detail",
+                        lambda q, max_results=5: {
+                            "results": [], "status": "empty", "detail": ""})
+    warnings = []
+    step, _delivered = pipeline._gather(
+        {"search": "a question with no answer"}, 1, None,
+        pipeline._UNOBSERVED, warnings)
+    assert step["search"]["nothing_found"] is True
+    assert not warnings
