@@ -40,6 +40,19 @@ import config
 
 REQUEST_TIMEOUT = float(os.environ.get("ASSISTANT_HTTP_TIMEOUT", "60"))
 
+# GENERATION IS NOT A LOOKUP, AND ONE TIMEOUT CANNOT SERVE BOTH. Embeddings
+# return in well under a second; a respond round sends a 17k-character system
+# prompt plus an accumulating payload and may generate thousands of tokens
+# before the first byte comes back. They shared the 60s ceiling, which was
+# never exercised while the Claude Code CLI was the provider — the CLI is a
+# subprocess and never touches urllib — so the first HTTP provider configured
+# lost turns to a limit chosen for the other role.
+#
+# A timeout that fires on a healthy-but-slow provider is indistinguishable
+# from a broken one from the operator's side, and the recovery is opposite:
+# wait, versus go and fix something.
+CHAT_TIMEOUT = float(os.environ.get("ASSISTANT_CHAT_TIMEOUT", "300"))
+
 
 @dataclass
 class EmbeddingBatch:
@@ -241,8 +254,24 @@ def _post_with_retry(req, attempts=_RETRY_ATTEMPTS):
     last = None
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=CHAT_TIMEOUT) as r:
                 return json.loads(r.read().decode())
+        # A READ TIMEOUT IS NOT A `URLError` AND SO ESCAPED THIS LOOP ENTIRELY.
+        # `urlopen` raises the bare socket `TimeoutError` when the socket is
+        # open and the body never finishes, so the one failure the backoff
+        # exists for was the one it never caught — and what reached the turn
+        # was "The read operation timed out", which names no provider, no
+        # stage and no number the operator could change.
+        except TimeoutError as exc:
+            last = RuntimeError(
+                f"chat provider did not respond within {CHAT_TIMEOUT:.0f}s. "
+                "The request was sent and the connection stayed open, so this "
+                "is a slow or overloaded provider rather than an unreachable "
+                "one — raise ASSISTANT_CHAT_TIMEOUT, or use a faster model.")
+            if attempt == attempts - 1:
+                raise last from exc
+            time.sleep(delay)
+            delay *= 2
         except urllib.error.HTTPError as exc:
             body = ""
             try:

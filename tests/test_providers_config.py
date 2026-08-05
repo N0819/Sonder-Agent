@@ -686,3 +686,38 @@ def test_no_stage_gets_a_smaller_output_ceiling_than_the_default():
     too_small = [p for p in pinned if p[2] < providers.DEFAULT_MAX_TOKENS]
     assert not too_small, f"ceiling below the default: {too_small}"
     assert providers.DEFAULT_MAX_TOKENS >= 8000
+
+
+def test_a_slow_provider_is_retried_and_named_rather_than_leaking_a_socket(
+        monkeypatch):
+    """THE ONE FAILURE THE BACKOFF EXISTS FOR WAS THE ONE IT NEVER CAUGHT. A
+    read timeout raises the bare socket `TimeoutError`, which is not a
+    `URLError`, so it escaped `_post_with_retry` entirely — unretried, and
+    surfaced to the turn as "The read operation timed out". That names no
+    provider, no stage, and no number the operator could change, and it is
+    indistinguishable from an unreachable host when the recovery is the
+    opposite one: wait, versus go and fix something."""
+    tries = []
+
+    def slow(req, timeout=None):
+        tries.append(timeout)
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", slow)
+    with pytest.raises(RuntimeError) as caught:
+        providers._post_with_retry(object(), attempts=2)
+
+    assert len(tries) == 2, "a timeout must be retried like any other blip"
+    assert tries[0] == providers.CHAT_TIMEOUT
+    message = str(caught.value)
+    assert "did not respond within" in message
+    assert "ASSISTANT_CHAT_TIMEOUT" in message
+
+
+def test_generation_does_not_inherit_the_lookup_timeout():
+    """Embeddings return in well under a second; a respond round sends a 17k
+    system prompt and may generate thousands of tokens before the first byte.
+    They shared one 60s ceiling, which the Claude Code CLI never exercised
+    because it is a subprocess and never touches urllib."""
+    assert providers.CHAT_TIMEOUT > providers.REQUEST_TIMEOUT
+    assert providers.CHAT_TIMEOUT >= 300
