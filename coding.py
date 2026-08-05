@@ -319,7 +319,7 @@ def judge(result, expect):
     return OUTCOME_CONFIRMED, "prediction held"
 
 
-def run_experiment(hypothesis_id, *, source, expect, turn_idx,
+def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                    files=None, command=None, timeout=None, note=""):
     """One experiment: predict, run, judge, record as evidence.
 
@@ -332,6 +332,7 @@ def run_experiment(hypothesis_id, *, source, expect, turn_idx,
         return {"outcome": OUTCOME_INCONCLUSIVE,
                 "why": "an experiment needs a prediction stated first",
                 "result": None, "evidence": None, "repeated": False}
+    source = str(source or "")
 
     # ONE code path writes the workspace, and the command RECORDED is the
     # command RUN. `payload["main.py"] = source` used to live inside the
@@ -342,8 +343,25 @@ def run_experiment(hypothesis_id, *, source, expect, turn_idx,
     # the fix gate opened, and the experiments row recorded a `source` that
     # had never executed. The recorded command was also a literal "python3"
     # while `sys.executable` was what actually ran.
+    # THE MOST OBVIOUS EXPERIMENT IN THE REPOSITORY WAS THE ONE IT COULD NOT
+    # RUN. `source` was required and always written to main.py, so "run the
+    # suite that is already here" had to invent a program in order to ask a
+    # question about programs that exist. The assistant tried it twice in one
+    # turn — a baseline `pytest tests/` and its two new tests by name — and
+    # both were dropped before they executed, which is why it could report a
+    # fix landing and no run confirming it. An experiment over the workspace
+    # as it stands is the normal case for a repository, not a special one.
+    #
+    # A named command needs no source. Only the bare `python3 main.py` default
+    # does, and that is the one path that now insists on it.
     payload = dict(files or {})
-    payload["main.py"] = source
+    if str(source).strip():
+        payload["main.py"] = source
+    elif command is None:
+        return {"outcome": OUTCOME_INCONCLUSIVE,
+                "why": "an experiment needs either source to run or a command "
+                       "naming what to run",
+                "result": None, "evidence": None, "repeated": False}
     if command is None:
         command = [sys.executable, "-s", "main.py"]
     result = sandbox.run(payload, command,

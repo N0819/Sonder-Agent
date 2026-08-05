@@ -219,3 +219,46 @@ def test_a_successful_turn_does_not_offer_retry(temp_db):
     user to ignore it, which is how the warnings line stops working."""
     _stub(respond={"reply": "a real reply"})
     assert pipeline.run_turn("hello")["respond_ok"] is True
+
+
+def test_an_experiment_may_name_a_command_instead_of_writing_a_program(
+        temp_db, tmp_path):
+    """THE MOST OBVIOUS EXPERIMENT IN THE REPOSITORY WAS THE ONE IT COULD NOT
+    RUN. This stage required `source`, so "run the suite that is already
+    here" had to invent a program in order to ask a question about programs
+    that exist, and the spec was dropped before it executed. Measured on a
+    live turn: the assistant landed a fix, queued a baseline `pytest tests/`
+    and its two new tests by name, and both were dropped here — so it could
+    report an edit and nothing that ran it, and said so.
+
+    `coding.run_experiment` already accepted a blank source; only this gate
+    refused, which is why no unit test saw it."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    _stub(respond={"reply": "checking", "experiment": [{
+        "hypothesis": "does the shipped helper still return 2?",
+        "command": ["python3", "-c", "import sys; print(2); sys.exit(0)"],
+        "expect": {"exit_zero": True, "stdout_has": "2"}}]})
+
+    out = pipeline.run_turn("verify it")
+
+    ran = out["trace"].get("experiments") or []
+    assert [e["outcome"] for e in ran] == ["confirmed"], (ran, out["warnings"])
+    assert not any("dropped an experiment" in w for w in out["warnings"])
+
+
+def test_a_dropped_experiment_says_which_half_is_missing(temp_db, tmp_path):
+    """"no hypothesis or no source" left the author guessing at their own
+    mistake, and the guess it invited was the wrong one — the assistant read
+    it as a hypothesis problem and kept resupplying the field that was
+    already there."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    _stub(respond={"reply": "x", "experiment": [
+        {"hypothesis": "", "source": "print(1)", "expect": {"exit_zero": True}},
+        {"hypothesis": "a real question", "expect": {"exit_zero": True}}]})
+
+    warns = pipeline.run_turn("go")["warnings"]
+
+    assert "dropped an experiment with no hypothesis" in warns
+    assert "dropped an experiment with no source or command" in warns

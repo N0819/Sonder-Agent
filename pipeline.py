@@ -534,9 +534,19 @@ def run_turn(user_text, session_id=None, run=None):
             continue
         question = str(spec.get("hypothesis") or "").strip()
         source = str(spec.get("source") or "")
-        if not question or not source.strip():
-            warnings.append("dropped an experiment with no hypothesis or no "
-                            "source")
+        command = spec.get("command") or None
+        # A COMMAND IS A WAY OF RUNNING SOMETHING TOO. Requiring `source`
+        # meant an experiment over the files already in the workspace — "run
+        # the suite in this repository" — had to invent a program first, so
+        # the assistant's own verification runs were dropped here before they
+        # executed and it could only report a fix landing with nothing that
+        # ran it. `coding.run_experiment` refuses the genuinely empty case.
+        #
+        # The warning also says WHICH half is missing. "no hypothesis or no
+        # source" left the author guessing at their own mistake.
+        if not question or not (source.strip() or command):
+            missing = "hypothesis" if not question else "source or command"
+            warnings.append(f"dropped an experiment with no {missing}")
             continue
         hyp = research.open_hypothesis(question, turn_idx, session_id)
         # The user's uploaded files are the working set: "run the tests in
@@ -549,7 +559,7 @@ def run_turn(user_text, session_id=None, run=None):
             outcome = coding.run_experiment(
                 hyp["id"], source=source, expect=spec.get("expect"),
                 turn_idx=turn_idx, files=files,
-                command=spec.get("command") or None,
+                command=command,
                 note=str(spec.get("note") or "")[:200])
         except Exception as exc:
             warnings.append(f"experiment harness failed: {str(exc)[:200]}")
