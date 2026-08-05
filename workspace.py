@@ -671,7 +671,15 @@ def list_dir(relative="", limit=200):
                 size = 0
             entries.append({"path": rel, "dir": False, "bytes": size,
                             "language": codemap.language_of(name) or ""})
-    return {"ok": True, "path": os.path.relpath(target, root).replace(".", ""),
+    # `relpath` returns "." for the root itself, and the fix for that stripped
+    # EVERY dot from the path — so `Sonder_Engine-alpha-7.2/` was echoed back as
+    # `Sonder_Engine-alpha-72/` while every entry inside it kept its real name,
+    # and any path with a version or an extension in it came back subtly wrong.
+    # A path that is not the path asked for is worse than an error, because it
+    # reads as an answer.
+    return {"ok": True,
+            "path": "" if os.path.relpath(target, root) == "." else
+                    os.path.relpath(target, root),
             "entries": entries, "count": len(entries), "truncated": truncated,
             "how_to_use_this": (
                 "One level only. Step into a directory by listing its path; "

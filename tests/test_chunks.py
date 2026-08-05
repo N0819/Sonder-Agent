@@ -577,3 +577,58 @@ def test_reading_raw_story_data_is_refused_with_the_reason(temp_db, tmp_path):
     assert got["ok"] is False
     assert "raw data" in got["error"]
     assert "Search it" in got["error"], "it must name the cheap approach"
+
+
+def test_a_document_is_split_at_its_headings(temp_db, tmp_path):
+    """MARKDOWN HAD NO SYMBOLS, SO IT BECAME ONE CHUNK PER FILE. `split_code`
+    asks the symbol scanner for boundaries and falls back to the whole file
+    when it finds none — right for an unparsed source, catastrophic for prose.
+    The four documents carrying the most design intent in an ingested project
+    came out atomic: CHANGELOG.md a single chunk of 352,149 characters,
+    UNBUILT.md 166,980, Design.md 124,525, against a 24,000 expand ceiling.
+    Visible in an outline and unreachable through it."""
+    doc = ("# Title\n\nintro para\n\n## First\n\n" + ("a " * 200)
+           + "\n\n## Second\n\n" + ("b " * 200) + "\n")
+    pieces = chunks.split_markdown(doc)
+
+    titles = [p["title"] for p in pieces]
+    assert len(pieces) >= 3, titles
+    assert any("First" in t for t in titles)
+    assert any("Second" in t for t in titles)
+
+
+def test_no_chunk_is_larger_than_an_expand_can_return(temp_db, tmp_path):
+    """ENFORCED WHERE EVERY CHUNK PASSES, because a splitter cannot promise it:
+    each cuts at a structural boundary, and a file with none between two points
+    produces a chunk as long as the gap. A 276,241-character chunk came out of
+    the code path and an 87,336 section out of the heading splitter, both over
+    MAX_EXPAND_CHARS — a chunk no expand can return is worse than absent."""
+    one_line = "x" * 90_000
+    pieces = chunks._bound_pieces([{"title": "big", "body": one_line,
+                                    "start": 1, "end": 1}])
+
+    assert len(pieces) > 1
+    assert all(len(p["body"]) <= chunks.MAX_CHUNK_CHARS + 1000 for p in pieces)
+    assert all("part" in p["title"] for p in pieces), "a part says it is one"
+    assert chunks.MAX_CHUNK_CHARS < chunks.MAX_EXPAND_CHARS
+
+
+def test_a_deliberate_exclusion_is_not_reported_as_an_unwalked_gap(temp_db,
+                                                                   tmp_path):
+    """THEY NEED OPPOSITE RESPONSES. The drift check compared "present with a
+    language" against "indexed" and called every difference unwalked — so
+    archive transcripts, which an ingest walked and skipped for a stated
+    reason, were reported as files no ingest had ever seen, advising a
+    re-ingest that would change nothing."""
+    import os
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    root = workspace.session_root(1)
+    os.makedirs(os.path.join(root, "demos"), exist_ok=True)
+    with open(os.path.join(root, "demos", "run.json"), "w") as fh:
+        fh.write('{"a": 1}\n')
+    workspace.store_upload(1, "live.py", b"def f():\n    return 1\n")
+    chunks.ingest_workspace()
+
+    gaps = [g["path"] for g in chunks._unwalked_sources(1)]
+    assert not any("run.json" in p for p in gaps), gaps

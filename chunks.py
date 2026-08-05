@@ -50,6 +50,10 @@ MAX_EXPAND_CHARS = 24_000
 # Below this a "chunk" is noise — a one-line helper on its own row buys an
 # entry in the list and tells the reader nothing.
 MIN_CHUNK_CHARS = 40
+# The largest a single chunk may be. `MAX_EXPAND_CHARS` is what an expand may
+# return, so a chunk above it is one no reader can ever open whole — visible in
+# an outline and unreachable through it, which is worse than absent.
+MAX_CHUNK_CHARS = 20_000
 
 # What one pass over a workspace is allowed to read off disk. Characters, not
 # files, for the reason stated above — and generous, because this bound is not
@@ -200,6 +204,92 @@ def split_prose(text):
              "body": b} for b in out]
 
 
+def split_markdown(text):
+    """Split a document at its headings.
+
+    MARKDOWN HAD NO SYMBOLS, SO IT BECAME ONE CHUNK PER FILE. `split_code`
+    asks the symbol scanner for boundaries and falls back to the whole file
+    when it finds none, which is right for an unparsed source and catastrophic
+    for prose: the four documents carrying the most design intent in the
+    ingested project came out atomic — `CHANGELOG.md` as a single chunk of
+    352,149 characters, `UNBUILT.md` 166,980, `Design.md` 124,525 — against a
+    24,000-character expand ceiling. The only way to read any part was to take
+    the whole thing, which is the failure that killed a turn outright.
+
+    Headings are what a document is navigated by, so they are what it is cut
+    at. Falls through to `split_prose` for a document with no headings at all,
+    rather than back to one chunk."""
+    lines = str(text or "").splitlines()
+    marks = [i for i, ln in enumerate(lines)
+             if re.match(r"^#{1,3} +\S", ln)]
+    if not marks:
+        return split_prose(text)
+    if marks[0] > 0:
+        marks.insert(0, 0)
+    out = []
+    for n, start in enumerate(marks):
+        end = marks[n + 1] if n + 1 < len(marks) else len(lines)
+        body = "\n".join(lines[start:end]).strip()
+        if not body:
+            continue
+        head = lines[start].lstrip("# ").strip() if lines[start].startswith("#") \
+            else "(preamble)"
+        if out and len(body) < MIN_CHUNK_CHARS:
+            out[-1]["body"] += "\n\n" + body
+            continue
+        # A HEADING IS NOT A LENGTH BOUND. Splitting on headings alone left a
+        # section with no sub-headings whole — `Design.md` came out with an
+        # 87,448-character chunk, still far over the 24,000 expand ceiling, so
+        # the document was navigable but that part of it was still unreadable.
+        # Long sections fall through to prose splitting, keeping the heading as
+        # the title so the pieces still say where they came from.
+        if len(body) > MAX_CHUNK_CHARS:
+            for n_part, part in enumerate(split_prose(body), 1):
+                out.append({"title": f"{head[:100]} ({n_part})",
+                            "start": start + 1, "end": end,
+                            "body": part["body"]})
+            continue
+        out.append({"title": head[:120] or "(section)",
+                    "start": start + 1, "end": end, "body": body})
+    return out or split_prose(text)
+
+
+def _bound_pieces(pieces):
+    """Break any piece longer than MAX_CHUNK_CHARS at line boundaries."""
+    out = []
+    for piece in pieces or []:
+        body = str(piece.get("body") or "")
+        if len(body) <= MAX_CHUNK_CHARS:
+            out.append(piece)
+            continue
+        # A LINE CAN BE LONGER THAN THE BOUND. Line boundaries are the cut
+        # that keeps a chunk readable, but a minified file or a single-line
+        # data blob has none — 90,000 characters on one line came back as one
+        # part and defeated the guard entirely. Hard-cut those; an unreadable
+        # cut is still better than an unreachable chunk.
+        lines = []
+        for line in body.splitlines(True):
+            while len(line) > MAX_CHUNK_CHARS:
+                lines.append(line[:MAX_CHUNK_CHARS])
+                line = line[MAX_CHUNK_CHARS:]
+            lines.append(line)
+        part, size = [], 0
+        parts = []
+        for line in lines:
+            if part and size + len(line) > MAX_CHUNK_CHARS:
+                parts.append("".join(part))
+                part, size = [], 0
+            part.append(line)
+            size += len(line)
+        if part:
+            parts.append("".join(part))
+        title = str(piece.get("title") or "")
+        for n, chunk in enumerate(parts, 1):
+            out.append({**piece, "body": chunk,
+                        "title": f"{title[:100]} [part {n}/{len(parts)}]"})
+    return out
+
+
 def put(session_id=WORKSPACE, kind='code', source_ref='', pieces=()):
     """Store one source's chunks, replacing any previous set for that source.
 
@@ -208,6 +298,18 @@ def put(session_id=WORKSPACE, kind='code', source_ref='', pieces=()):
     which is the failure mode where an expand returns code that no longer
     exists."""
     session_id = _scope(session_id)
+    # ENFORCED HERE BECAUSE A SPLITTER CANNOT PROMISE IT. Every splitter cuts
+    # at a structural boundary — symbols, headings, blank lines — and a file
+    # that simply has none between two points produces a chunk as long as the
+    # gap: a 276,241-character chunk from the code path, an 87,336 section of
+    # `Design.md` with no sub-headings, both far over `MAX_EXPAND_CHARS`. A
+    # chunk no expand can return is visible in an outline and unreachable
+    # through it, which is worse than absent.
+    #
+    # So the bound lives where every chunk passes, not in each splitter that
+    # must remember it. Cut at line boundaries, and the piece says it is one
+    # part of several rather than pretending to be whole.
+    pieces = _bound_pieces(pieces)
     rows = []
     for ordinal, piece in enumerate(pieces):
         body = str(piece.get("body") or "")
@@ -311,7 +413,9 @@ def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
         spent += len(source)
         indexed += 1
         live.add(path)
-        total += len(put(session_id, "code", path, split_code(source, language)))
+        pieces = (split_markdown(source) if language == "markdown"
+                  else split_code(source, language))
+        total += len(put(session_id, "code", path, pieces))
     # ORPHANS OUTLIVE THE RULE THAT EXCLUDED THEM. `put` replaces per source,
     # so a file that STOPS being indexed is never revisited and its chunks sit
     # in the table forever — still returned by `outline` and `expand`, still
@@ -524,6 +628,17 @@ def _unwalked_sources(session_id, limit=8):
     known = {r["source_ref"] for r in q(
         "SELECT DISTINCT source_ref FROM chunks WHERE session_id=?",
         (_scope(session_id),))}
+    # A DELIBERATE EXCLUSION IS NOT A GAP, AND THEY NEED OPPOSITE RESPONSES.
+    # This compared "present with a language" against "indexed" and called
+    # every difference unwalked — so the archive transcripts, which an ingest
+    # walked and skipped for a stated reason, were reported as files no ingest
+    # had ever seen, advising a re-ingest that would change nothing. The rule
+    # that excluded them has to be applied here too, or the report describes a
+    # different workspace from the one the indexer saw.
+    present = {p for p in present
+               if not (workspace.in_archive_dir(p)
+                       and codemap.language_of(os.path.basename(p))
+                       != "markdown")}
     missing = sorted(present - known)
     if not missing:
         return []
