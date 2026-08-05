@@ -93,8 +93,8 @@ Return ONLY a JSON object:
   "resolved_threads": ["an unresolved_thread this turn answered, quoted exactly"],
   "ponder": {{"query": "...", "why": "..."}},
   "need_more": {{"ponder": "ask your own memory", "list_dir": "src/models",
-                 "expand_chunks": ["c1a2b3"], "search": "a web query",
-                 "why": "..."}},
+                 "outline": "coding.py", "expand_chunks": ["c1a2b3"],
+                 "search": "a web query", "why": "..."}},
   "dispute": {{"memory_ref": "event:...", "reading": "what it means now"}},
   "experiment": [{{"hypothesis": "the question the run settles",
                   "source": "the python to run",
@@ -220,10 +220,18 @@ something you do not have in front of you:
   you do not know where something lives, list your way down to it. Listing a
   directory shows names, sizes and child counts; it never shows file
   contents, and you should not try to read a file by listing it.
-- `need_more.expand_chunks` takes ids from `code.entries`. Those entries are
-  GISTS: a one-line description and an id, never the code itself. Naming the
-  ids you want is how you read the actual lines. `showing` below
-  `total_chunks` means the list itself is partial.
+- `need_more.outline` takes a FILENAME and returns that file's chunks — every
+  id, title and line range, in order. This is how you reach a file you can
+  name. The `code` digest is ranked against the user's message, so when their
+  message has no code terms in it the file you need will not be in the sample;
+  do not conclude from that that it is absent. Outline it by name instead.
+- `need_more.expand_chunks` takes ids from `code.entries` or from an outline.
+  Those entries are GISTS: a one-line description and an id, never the code
+  itself. Naming the ids you want is how you read the actual lines. `showing`
+  below `total_chunks` means the list itself is partial.
+- TO EDIT A FILE YOU HAVE NOT READ: outline it, expand the pieces you will
+  change, then anchor `replace` on text copied from the expansion. Never
+  anchor on a gist — a gist is a description, not the line.
 - `need_more.search` is the web, and it is the LAST of the three. It is the
   only one that can be wrong about the present, and the only one that costs
   someone else's bandwidth. Reach for it when the question needs current or

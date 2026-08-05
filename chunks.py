@@ -299,6 +299,58 @@ def reingest_path(relative, session_id=WORKSPACE):
                    split_code(got["text"], language)))
 
 
+def outline(path, session_id=WORKSPACE, limit=200):
+    """Every chunk of ONE named file: id, title, gist, line range.
+
+    THE MISSING STEP BETWEEN KNOWING A FILENAME AND READING IT. `digest` ranks
+    the whole workspace against the turn's message, and `expand` needs ids —
+    so an assistant told "fix coding.py" had no route to coding.py's ids
+    unless the user's own words happened to rank it into the sample. Measured
+    on a real turn: the message was "Go for it", nothing in it ranked, the
+    digest showed 67 of 987 chunks and stopped at `beliefs.py`, and both the
+    assistant and the deep subagent it delegated to reported they could not
+    obtain an anchor for the file they had been asked to edit. Neither was
+    confused; the lookup did not exist.
+
+    Suffix match, so `coding.py` finds it wherever the tree puts it — an
+    uploaded project sits under its archive's own directory, and requiring
+    the full path would mean knowing the layout to ask about the file.
+    Ambiguity is REPORTED rather than resolved by picking: two files with one
+    basename is exactly when guessing is worst."""
+    session_id = _scope(session_id)
+    wanted = str(path or "").strip().strip("/")
+    if not wanted:
+        return {"path": "", "error": "no path given", "entries": []}
+    rows = q("SELECT chunk_key,source_ref,title,gist,chars,start_line,end_line "
+             "FROM chunks WHERE session_id=? ORDER BY source_ref, start_line, id",
+             (session_id,))
+    sources = sorted({r["source_ref"] for r in rows})
+    matches = [s for s in sources
+               if s == wanted or s.endswith("/" + wanted)]
+    if not matches:
+        near = [s for s in sources if wanted.lower() in s.lower()][:8]
+        return {"path": wanted, "entries": [],
+                "error": f"no indexed file matches {wanted!r}",
+                **({"did_you_mean": near} if near else {}),
+                "note": "`not_indexed` in the code digest lists files this "
+                        "index does not cover."}
+    if len(matches) > 1:
+        return {"path": wanted, "entries": [],
+                "error": f"{len(matches)} files match {wanted!r}; name one",
+                "candidates": matches[:8]}
+    source = matches[0]
+    entries = [{"id": r["chunk_key"], "title": r["title"],
+                "gist": r["gist"], "lines": [r["start_line"], r["end_line"]],
+                "chars": r["chars"]}
+               for r in rows if r["source_ref"] == source][:limit]
+    return {"path": source, "chunks": len(entries), "entries": entries,
+            "how_to_use_this": (
+                "The whole file as an ordered list of pieces. Put the ids you "
+                "need in `expand_chunks` to read their actual lines — an "
+                "anchored edit needs text copied from an expansion, never "
+                "from a gist.")}
+
+
 def expand(session_id=WORKSPACE, ids=(), budget=MAX_EXPAND_CHARS):
     """Bodies for the ids asked for, in the order asked, within a budget.
 
@@ -317,6 +369,19 @@ def expand(session_id=WORKSPACE, ids=(), budget=MAX_EXPAND_CHARS):
     for key in wanted:
         row = rows.get(key)
         if row is None:
+            # A PATH WHERE AN ID WAS EXPECTED IS A REASONABLE MISTAKE, and
+            # answering it with a bare `unknown` teaches nothing. The
+            # assistant knows filenames long before it knows chunk ids, so
+            # asking to expand one is the obvious wrong guess — met here with
+            # the file's outline, which is what it needed to ask for.
+            guess = outline(key, session_id)
+            if guess.get("entries"):
+                out.append({"id": key, "not_a_chunk_id": True,
+                            "resolved_as_file": guess["path"],
+                            "entries": guess["entries"],
+                            "note": "that is a path, not a chunk id — here "
+                                    "are its chunks; expand the ids you want"})
+                continue
             out.append({"id": key, "unknown": True})
             continue
         body = row["body"]

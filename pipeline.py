@@ -100,7 +100,14 @@ def _aspects(sheet_entries, threads, persona_sheet):
 # way the research loop tells it: a deadline you cannot see is one you cannot
 # plan against, and an agent that discovers it is out of rounds has already
 # wasted the last one.
-DELIBERATION_MAX_ROUNDS = 3
+# RAISED FROM 3, AND THE MEASUREMENT IS WHY. Landing one anchored edit costs
+# orient → outline → expand → answer: four rounds, and three was the ceiling.
+# A real turn ran out with the assistant reporting "surfacing ids and then
+# expanding them is two rounds; I have one" — so the budget, not its
+# judgement, is what stopped the work. The model is told how many remain and
+# stops as soon as it is satisfied, so this raises the ceiling on hard turns
+# without spending anything extra on easy ones.
+DELIBERATION_MAX_ROUNDS = 5
 # What one ponder is allowed to pull back into the turn.
 PONDER_RECALL_LIMIT = 8
 PONDER_SEARCH_RESULTS = 5
@@ -216,6 +223,16 @@ def _gather(more, turn_idx, session_id, run, warnings):
         step["listings"] = listings
         run.emit("navigate", paths=paths[:6],
                  entries=sum(l.get("count", 0) for l in listings))
+    # Filename → ids. The step between knowing what to edit and being able to
+    # read it, which did not exist: `digest` ranks the workspace against the
+    # turn's message, so "Go for it" surfaced no code at all and the file the
+    # assistant had been asked to change was unreachable.
+    wants = more.get("outline")
+    if isinstance(wants, str) or isinstance(wants, list):
+        paths = [wants] if isinstance(wants, str) else [str(p) for p in wants]
+        step["outlines"] = [chunks.outline(p, session_id) for p in paths[:4]]
+        run.emit("outline", paths=paths[:4],
+                 chunks=sum(o.get("chunks", 0) for o in step["outlines"]))
     ids = more.get("expand_chunks")
     if isinstance(ids, list) and ids:
         expanded = chunks.expand(session_id, ids)

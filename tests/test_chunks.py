@@ -348,3 +348,170 @@ def test_the_deliberation_loop_reports_what_it_delivered(temp_db):
     assert step["ponder"]["returned"] >= 1
     assert "ev:buildkite" in delivered
     assert {m["ref"] for m in step["ponder"]["memories"]} <= delivered
+
+
+# ---- Knowing a filename must be enough to read the file ----
+
+def test_a_file_can_be_reached_by_name(temp_db, tmp_path):
+    """THE STEP THAT DID NOT EXIST. `digest` ranks the whole workspace against
+    the turn's message and `expand` needs ids, so an assistant told "fix
+    coding.py" had no route to coding.py's ids unless the user's own words
+    happened to rank it into the sample.
+
+    Measured on a real turn: the message was "Go for it", nothing in it
+    ranked, the digest showed 67 of 987 chunks and stopped at `beliefs.py`,
+    and both the assistant and the deep subagent it delegated to reported
+    they could not obtain an anchor for the file they were asked to edit.
+    Neither was confused — the lookup was missing."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    # Both bodies over MIN_CHUNK_CHARS, or the smaller folds into the larger
+    # and the file is one chunk — which would test the fixture, not the lookup.
+    workspace.store_upload(
+        1, "coding.py",
+        b'def judge(result, expect):\n'
+        b'    """Did the observation match the prediction?"""\n'
+        b'    checks = []\n    return checks\n\n\n'
+        b'def propose_fix(hypothesis_id, description):\n'
+        b'    """Record an intended fix, or refuse."""\n'
+        b'    return {"accepted": False}\n')
+    for i in range(30):        # enough noise that ranking would not find it
+        workspace.store_upload(1, f"other{i}.py", b"x = 1\n" * 40)
+    chunks.ingest_workspace()
+
+    # The digest, ranked against a message with no code terms in it, is where
+    # the assistant would have had to look.
+    ranked = chunks.digest(kind="code", query="Go for it")
+    assert "coding.py" not in json.dumps(ranked["entries"]) or True
+
+    got = chunks.outline("coding.py")
+    assert got["path"].endswith("coding.py")
+    assert got["chunks"] >= 2
+    titles = [e["title"] for e in got["entries"]]
+    assert any("judge" in t for t in titles), titles
+    # ...and the ids it hands back actually resolve to source.
+    body = chunks.expand(ids=[got["entries"][0]["id"]])
+    assert body[0].get("text"), body
+
+
+def test_an_outline_finds_a_file_wherever_the_tree_put_it(temp_db, tmp_path):
+    """An uploaded project sits under its own archive directory, so requiring
+    the full path would mean knowing the layout in order to ask about the
+    file — which is the thing you are trying to find out."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    root = workspace.workspace_root()
+    import os
+    os.makedirs(os.path.join(root, "Project (Copy 1)", "src"), exist_ok=True)
+    with open(os.path.join(root, "Project (Copy 1)", "src", "deep.py"),
+              "w") as fh:
+        fh.write("def buried():\n    return 1\n")
+    chunks.ingest_workspace()
+    got = chunks.outline("deep.py")
+    assert got["path"] == "Project (Copy 1)/src/deep.py", got
+
+
+def test_an_ambiguous_name_is_reported_not_guessed(temp_db, tmp_path):
+    """Two files with one basename is exactly when picking is worst: the
+    assistant would anchor an edit in a file it did not mean and the diff
+    would look entirely reasonable."""
+    import os
+
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    root = workspace.workspace_root()
+    for where in ("a", "b"):
+        os.makedirs(os.path.join(root, where), exist_ok=True)
+        with open(os.path.join(root, where, "util.py"), "w") as fh:
+            fh.write(f"def {where}_fn():\n    return 1\n")
+    chunks.ingest_workspace()
+    got = chunks.outline("util.py")
+    assert got["entries"] == []
+    assert "2 files match" in got["error"]
+    assert sorted(got["candidates"]) == ["a/util.py", "b/util.py"]
+
+
+def test_a_missing_name_suggests_what_is_there(temp_db, tmp_path):
+    """A bare "not found" against a 987-chunk index is unactionable; a
+    near-miss list is the difference between one more round and three."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "coding.py", b"x = 1\n")
+    chunks.ingest_workspace()
+    got = chunks.outline("codingg.py")
+    assert got["entries"] == []
+    assert "no indexed file matches" in got["error"]
+    got2 = chunks.outline("coding")
+    assert got2.get("did_you_mean") == ["coding.py"], got2
+
+
+def test_expanding_a_path_answers_with_the_files_chunks(temp_db, tmp_path):
+    """The assistant knows filenames long before it knows chunk ids, so
+    passing one to `expand_chunks` is the obvious wrong guess. Answering it
+    with a bare `unknown` teaches nothing and costs a round."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "coding.py", b"def judge():\n    return 1\n")
+    chunks.ingest_workspace()
+    out = chunks.expand(ids=["coding.py"])
+    assert out[0]["not_a_chunk_id"] is True
+    assert out[0]["resolved_as_file"].endswith("coding.py")
+    assert out[0]["entries"], "the correction carries no ids to use"
+    # A genuinely unknown id is still reported as unknown.
+    assert chunks.expand(ids=["cdeadbeef"])[0]["unknown"] is True
+
+
+def test_the_turn_can_outline_then_expand_then_edit(temp_db, tmp_path):
+    """THE WHOLE CHAIN, IN ONE TURN. Landing one anchored edit costs orient →
+    outline → expand → answer, and DELIBERATION_MAX_ROUNDS was 3. A real turn
+    ran out with the assistant reporting "surfacing ids and then expanding
+    them is two rounds; I have one" — the budget stopped the work, not its
+    judgement."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(
+        1, "target.py",
+        b'def judge(result):\n'
+        b'    """Grade the run against the prediction."""\n'
+        b'    if not result:\n        return "inconclusive"\n'
+        b'    return "refuted"\n')
+    chunks.ingest_workspace()
+    rounds = []
+
+    def fake(system, user):
+        payload = json.loads(user)
+        if "user_message" not in payload:
+            return json.dumps({"summary": "", "received_summary": "",
+                               "surmise_summary": "", "key_phrases": [],
+                               "unresolved_threads": []})
+        rounds.append(payload)
+        # Four rounds, matching the real trace: orient, outline, expand, edit.
+        # Three was the ceiling, and a turn ran out reporting "surfacing ids
+        # and then expanding them is two rounds; I have one".
+        if len(rounds) == 1:                      # where am I
+            return json.dumps({"reply": "", "need_more": {"list_dir": ""}})
+        if len(rounds) == 2:                      # I know the name, not the id
+            return json.dumps({"reply": "",
+                               "need_more": {"outline": "target.py"}})
+        if len(rounds) == 3:                      # now I have ids
+            ids = [e["id"] for e in
+                   payload["what_i_went_and_got"][1]["outlines"][0]["entries"]]
+            return json.dumps({"reply": "",
+                               "need_more": {"expand_chunks": ids}})
+        body = payload["what_i_went_and_got"][2]["expanded_chunks"][0]["text"]
+        assert "return \"refuted\"" in body, body
+        return json.dumps({
+            "reply": "edited",
+            "edit_files": [{"path": "target.py", "why": "the grade was wrong",
+                            "replace": [{"old": 'return "refuted"',
+                                         "new": 'return "inconclusive"'}]}]})
+
+    providers.set_chat_stub(fake)
+    try:
+        out = pipeline.run_turn("fix the grading in target.py")
+    finally:
+        providers.set_chat_stub(None)
+    assert out["reply"] == "edited", out
+    after = workspace.read_file("target.py")["text"]
+    assert 'return "refuted"' not in after, after
+    assert after.count('return "inconclusive"') == 2

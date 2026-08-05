@@ -138,6 +138,10 @@ function reasoningLine(ev) {
     }
     return text;
   }
+  if (ev.stage === 'outline') {
+    return 'outlined ' + (ev.paths || []).join(', ')
+      + '\n   ' + ev.chunks + ' chunks located';
+  }
   if (ev.stage === 'stream') return null;   // rendered live, not as a step
   if (ev.stage === 'edit') {
     return 'edited ' + ev.path + (ev.created ? ' (new file)' : '')
