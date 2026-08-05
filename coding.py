@@ -115,6 +115,32 @@ _HARNESS_FAILURE_CUES = (
 )
 
 
+OBSERVATION_CHARS = 4000
+# Enough for the verdict line and the start of whatever spoke first.
+_OBSERVATION_HEAD = 1200
+
+
+def _fit_observation(text, limit=OBSERVATION_CHARS):
+    """Keep both ends of a long observation, and say what fell out.
+
+    `observation[:4000]` kept the HEAD, which is the wrong end for every test
+    runner there is: `sandbox._tail` deliberately truncates each stream from
+    the front so the SUMMARY survives, and then this cut the summary back off.
+    Observed on a real collect run — 9.9 seconds, a full list of collected
+    tests, and the one line saying how many were collected and how many errored
+    was the line that did not make it into the row.
+
+    Head as well as tail because the head carries `exit N in Xs` and the first
+    thing either stream said, and a reader who loses that cannot tell a crash
+    from a clean run with noisy output."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    marker = f"\n… [{len(text) - limit:,} chars elided from the middle] …\n"
+    tail = limit - _OBSERVATION_HEAD - len(marker)
+    return text[:_OBSERVATION_HEAD] + marker + text[-tail:]
+
+
 def _observation_text(result):
     """What happened, in the form the evidence row keeps.
 
@@ -413,7 +439,8 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
        "command,expect,outcome,observation,note,turn_idx,created) "
        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
        (hypothesis_id, digest, source[:8000], len(source), json.dumps(command),
-        json.dumps(expect), outcome, observation[:4000], str(note)[:400],
+        json.dumps(expect), outcome, _fit_observation(observation),
+        str(note)[:400],
         turn_idx, time.time()))
 
     stance = {OUTCOME_CONFIRMED: "supports",

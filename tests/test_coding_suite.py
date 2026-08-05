@@ -772,3 +772,28 @@ def test_a_nested_pytest_does_not_restamp_the_outer_harness(temp_db):
     result = sandbox.run({"main.py": "print('hi')"},
                          [sys.executable, "-s", "main.py"])
     assert result["harness"] == ""
+
+
+def test_a_long_observation_keeps_the_end_a_test_runner_puts_the_answer_in(temp_db):
+    """`observation[:4000]` kept the head, which is the wrong end for every
+    test runner there is. `sandbox._tail` truncates each stream from the FRONT
+    so the summary survives, and this cut the summary straight back off.
+    Observed on a real collect run: 9.9 seconds, the full list of collected
+    tests stored, and the one line saying how many were collected and how many
+    errored was the line that did not make it into the row."""
+    body = "\n".join(f"tests/test_thing.py::test_case_{n}" for n in range(600))
+    text = f"exit 1 in 9.9s — stdout: {body}\n3 errors, 4571 tests collected"
+    assert len(text) > coding.OBSERVATION_CHARS, "fixture must exceed the cap"
+    fitted = coding._fit_observation(text)
+    assert len(fitted) <= coding.OBSERVATION_CHARS
+    assert fitted.endswith("3 errors, 4571 tests collected")
+    # The head is what tells a crash from a clean run with noisy output.
+    assert fitted.startswith("exit 1 in 9.9s")
+    # Elision declared, not silent — a reader must not read the join as real.
+    assert "elided from the middle" in fitted
+
+
+def test_a_short_observation_is_stored_exactly(temp_db):
+    """The common case must not grow a marker it did not earn."""
+    assert coding._fit_observation("exit 0 in 0.1s — stdout: ok") == \
+        "exit 0 in 0.1s — stdout: ok"
