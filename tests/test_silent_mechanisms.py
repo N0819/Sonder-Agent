@@ -36,6 +36,14 @@ def test_every_prompt_is_rendered_through_one_seam(tmp_path):
     assert "{{" not in rendered and '"reply"' in rendered
 
 
+# Measured, not chosen: RESPOND_SYSTEM shares 0.9997 of its prefix across two
+# personas and RESEARCH_SYSTEM 0.9977, so 0.9 clears both with room while
+# still failing anything that moves the variable meaningfully up the prompt.
+# The old floor was 0.5, which a mutant with the persona hoisted to the 55%
+# mark passed — the guard could not fail for the reason it exists.
+_PREFIX_FLOOR = 0.9
+
+
 def test_the_contract_comes_before_the_variable(tmp_path):
     """Cacheability is a prefix property: a provider caches up to the first
     byte that differs, so a variable near the top costs the whole prompt."""
@@ -43,7 +51,24 @@ def test_the_contract_comes_before_the_variable(tmp_path):
         a = prompts.render(template, persona="alpha")
         b = prompts.render(template, persona="beta-and-longer")
         shared = len(os_common_prefix(a, b))
-        assert shared > len(a) * 0.5, template[:40]
+        assert shared > len(a) * _PREFIX_FLOOR, template[:40]
+
+
+def test_a_variable_moved_to_the_middle_fails_the_guard():
+    """The floor above was 0.5 for as long as the guard existed, so a persona
+    hoisted into the middle of the contract scored 0.5486 and PASSED. The
+    guard could not fail for the reason it was written, which makes it a
+    comment. This is that mutant, held against the floor."""
+    # Placed at ~55% deliberately: the mutant has to land BETWEEN the old
+    # floor and the new one, or it proves nothing about the loosening. A
+    # persona at the exact midpoint scores 0.4994 and the old guard catches
+    # it — which is why the hole went unnoticed. This is the one that got
+    # through: 0.5493, comfortably over 0.5, nowhere near 0.9.
+    template = ("HEAD " * 440) + "{persona}" + (" TAIL" * 360)
+    a = prompts.render(template, persona="alpha")
+    b = prompts.render(template, persona="beta-and-longer")
+    shared = len(os_common_prefix(a, b))
+    assert shared < len(a) * _PREFIX_FLOOR
 
 
 def os_common_prefix(a, b):

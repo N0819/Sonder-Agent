@@ -600,6 +600,20 @@ def apply_edit(path, contents=None, *, turn_idx, replace=None,
     if not result.get("ok"):
         return {"ok": False, "path": str(path),
                 "why": result.get("error") or "the write was refused"}
+    # A WRITE THAT CHANGED NOTHING IS NOT AN EDIT, AND CALLING IT ONE COSTS
+    # FAR MORE THAN THE WASTED CALL. `unchanged` was returned here, carried
+    # through the pipeline into the trace, and never read by anything — so a
+    # no-op write reported "edited {path}" with an empty diff AND minted the
+    # `witnessed` memory below saying so. The assistant then RECALLED making
+    # a change that was never on disk and defended it across two turns
+    # against the file itself, because its own memory was the evidence.
+    # This is the last stage where a no-op and a real edit can still be told
+    # apart; after it they are the same row.
+    if result.get("unchanged"):
+        return {"ok": False, "path": result["path"],
+                "why": "the file already reads exactly like that — nothing "
+                       "changed, so there is no edit to report",
+                "gated_on": hypothesis_id}
     # The map is corrected in the same call that invalidated it.
     rechunked = chunks.reingest_path(result["path"], session_id or 0)
     # An edit is something the assistant DID, witnessed, not concluded. The

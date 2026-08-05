@@ -744,12 +744,20 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                 why=str(spec.get("why") or "")[:200], session_id=session_id)
         except Exception as exc:
             warnings.append(f"edit harness failed: {str(exc)[:200]}")
+            run.emit("edit", state="failed", path=path, why=str(exc)[:200])
             continue
         if not done["ok"]:
+            # AS LOUD AS A SUCCESS, AND FOR THE SAME REASON THE SUCCESS IS.
+            # This path appended a warning while the one below emitted, so
+            # the live trace showed every edit that landed and none that was
+            # turned away. A refusal that is quieter than an acceptance is
+            # the exact shape of failure that gets read as success.
             warnings.append(f"edit refused for {path}: {done['why']}")
+            run.emit("edit", state="refused",
+                     path=done.get("path") or path, why=done["why"])
             continue
-        run.emit("edit", path=done["path"], created=done["created"],
-                 rechunked=done["rechunked"])
+        run.emit("edit", state="applied", path=done["path"],
+                 created=done["created"], rechunked=done["rechunked"])
         edits.append({k: done[k] for k in
                       ("path", "diff", "created", "unchanged", "rechunked")})
     if edits:

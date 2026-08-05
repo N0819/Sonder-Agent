@@ -24,6 +24,7 @@ Four rules, each inherited from a scar in Sonder Engine:
 from __future__ import annotations
 
 import coding
+import memory
 import research
 import sandbox
 import ui_review
@@ -679,3 +680,38 @@ def test_the_ceiling_is_applied_where_it_cannot_be_forgotten(temp_db):
                       timeout=10_000)
     assert out["ok"] is True
     assert sandbox.MAX_TIMEOUT < 10_000
+
+
+def test_a_write_that_changed_nothing_is_not_reported_as_an_edit(temp_db,
+                                                                 tmp_path):
+    """THE MOST EXPENSIVE SILENT SUCCESS IN THE SUITE. `unchanged` was
+    returned, carried into the trace and read by nothing, so a no-op write
+    reported "edited m.py" with an empty diff and minted a `witnessed`
+    memory saying so. The assistant then recalled making a change that was
+    never on disk and defended it across two turns against the file itself,
+    because its own memory was the evidence."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "m.py", b"a = 1\n")
+
+    done = coding.apply_edit("m.py", "a = 1\n", turn_idx=1, why="no-op")
+    assert done["ok"] is False
+    assert "already reads" in done["why"]
+    minted = memory.q("SELECT COUNT(*) AS n FROM memories "
+                      "WHERE event_key='edit:1:m.py'", one=True)
+    assert minted["n"] == 0
+
+
+def test_a_replacement_that_produces_the_original_text_is_refused(temp_db,
+                                                                  tmp_path):
+    """The anchored path reaches the same no-op by a different road: every
+    replacement matches exactly once, so nothing is refused upstream, and the
+    text that comes out is the text that went in."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "m.py", b"a = 1\n")
+
+    done = coding.apply_edit("m.py", turn_idx=1,
+                             replace=[{"old": "a = 1", "new": "a = 1"}])
+    assert done["ok"] is False
+    assert workspace.read_file("m.py")["text"] == "a = 1\n"

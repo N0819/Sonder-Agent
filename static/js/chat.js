@@ -196,6 +196,13 @@ function reasoningLine(ev) {
       + (ev.iterations === 1 ? '' : 's') + ' — ' + ev.why;
   }
   if (ev.stage === 'edit') {
+    // A refused edit reads as plainly as an applied one. The trace used to
+    // carry only the ones that worked, which made "no edit line" and "the
+    // edit was turned away" look identical from here.
+    if (ev.state === 'refused') return 'edit refused — ' + ev.path
+      + '\n   ' + ev.why;
+    if (ev.state === 'failed') return 'edit harness failed — ' + ev.path
+      + '\n   ' + ev.why;
     return 'edited ' + ev.path + (ev.created ? ' (new file)' : '')
       + '\n   re-chunked into ' + ev.rechunked + ' pieces';
   }
