@@ -60,6 +60,23 @@ dropped, so following them is the only way your work survives):
 - A claim about the user (user_model_updates) needs evidence: "current" for
   their message this turn, or a delivered memory_ref. Ungrounded updates
   are dropped.
+- Memories delivered by `need_more.ponder` mid-turn are citable exactly like
+  the ones in `memory` — the ref beside each one is the ref to cite.
+
+CLOSING A THREAD: `unresolved_threads` carries `open_since`. Nothing but you
+re-reads the world, so a thread goes on being asked until you close it — and
+one is answered often enough by another field in the same payload. When this
+turn settles one, quote it verbatim in `resolved_threads`. A thread you are
+merely tired of is not resolved; leave it open and say what would settle it.
+
+READING open_research: every hypothesis opens at `opened_at` (0.3 — an
+unresearched question leans toward "I do not know yet") and moves only when
+evidence arrives, so compare `confidence` against `opened_at` and the
+`evidence` tally rather than against the other entries. Movement is
+deliberately asymmetric: one refutation costs more than one corroboration
+buys, because a single source cannot settle a question and a single
+counter-example can unsettle one. Two hypotheses at the same number are two
+questions that received the same evidence, not a default.
 
 Return ONLY a JSON object:
 {{
@@ -73,6 +90,7 @@ Return ONLY a JSON object:
     {{"content": "a fact worth keeping verbatim", "provenance": "told"}}
   ],
   "research": {{"question": "..."}},
+  "resolved_threads": ["an unresolved_thread this turn answered, quoted exactly"],
   "ponder": {{"query": "...", "why": "..."}},
   "need_more": {{"ponder": "ask your own memory", "list_dir": "src/models",
                  "expand_chunks": ["c1a2b3"], "search": "a web query",

@@ -231,3 +231,32 @@ def test_a_legacy_thread_written_as_a_bare_string_still_reads(temp_db):
     threads = memory.get_memory_summary()["unresolved_threads"]
     assert threads == [{"thread": "a thread from before the stamp",
                         "since_turn": 7}]
+
+
+def test_a_turn_can_close_a_thread_it_answered(temp_db):
+    """Only the consolidator could ever drop a thread, and it runs every
+    CONSOLIDATE_EVERY_TURNS turns — so a question answered by a field sitting
+    beside it in the same payload went on being asked for up to ten more
+    turns. Two were observed doing exactly that."""
+    memory.save_memory_summary(
+        "early", start_turn_idx=1, end_turn_idx=4,
+        unresolved_threads=["how are the shown gists chosen?",
+                            "what is the user actually building?"])
+    outcome = memory.close_threads(["how are the shown gists chosen?"], 5)
+    assert outcome["closed"] == ["how are the shown gists chosen?"]
+    assert outcome["unknown"] == []
+    left = [t["thread"] for t
+            in memory.get_memory_summary()["unresolved_threads"]]
+    assert left == ["what is the user actually building?"]
+
+
+def test_closing_a_thread_that_does_not_exist_says_so(temp_db):
+    """The `chunks.expand` rule: an unmatched handle is reported, never
+    dropped. A silent no-op reads as "closed" and the thread keeps appearing,
+    which is the confusing half of the bug it was meant to fix."""
+    memory.save_memory_summary("early", start_turn_idx=1, end_turn_idx=4,
+                               unresolved_threads=["a live question"])
+    outcome = memory.close_threads(["a question nobody asked"], 5)
+    assert outcome["closed"] == []
+    assert outcome["unknown"] == ["a question nobody asked"]
+    assert len(memory.get_memory_summary()["unresolved_threads"]) == 1

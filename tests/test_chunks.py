@@ -274,3 +274,77 @@ def test_the_walked_count_and_the_indexed_count_reconcile(temp_db, tmp_path):
     assert index["indexed_sources"] + index["skipped_count"] == walked
     assert {e["path"] for e in index["skipped"]} == {"requirements.txt",
                                                      "Makefile"}
+
+
+# ---- A memory fetched mid-turn has to be usable ----
+
+def test_a_pondered_memory_arrives_with_a_ref(temp_db):
+    """THE PONDER LANE RETURNED UNUSABLE MATERIAL. `_gather` read
+    `r.get("ref")` — not a key any memory row carries — so every pondered
+    memory arrived as `ref: null`. Ten of them in one measured turn.
+
+    Under the citation rule a memory that cannot be named cannot be used, so
+    the assistant went and asked its own memory, was handed the answer, and
+    had to reply as though it had never looked. Silent in both directions:
+    `.get` on a missing key is None rather than an error, and a null ref reads
+    as "this row happens to have none" rather than "the lane is broken".
+
+    THE SECOND HALF is the citation gate. `delivered` was built once at stage
+    1, so even a correctly-named pondered memory was stripped as invented.
+    The ponder query here is deliberately unrelated to the user's message, or
+    stage-1 recall delivers the row anyway and the mid-turn path is never the
+    thing under test."""
+    import memory
+    # turn_idx=0, like the ponder test above: a row minted at the ordinal
+    # being decided is correctly invisible to the turn deciding it.
+    memory.add_memory("semantic", "told", 0.8,
+                      "the deploy pipeline runs on buildkite", turn_idx=0,
+                      event_key="ev:buildkite")
+    rounds = []
+
+    def fake(system, user):
+        payload = json.loads(user)
+        if "user_message" not in payload:
+            return json.dumps({"summary": "", "received_summary": "",
+                               "surmise_summary": "", "key_phrases": [],
+                               "unresolved_threads": []})
+        rounds.append(payload)
+        if len(rounds) == 1:
+            return json.dumps({"reply": "hold on",
+                               "need_more": {"ponder": "deploy pipeline"}})
+        got = payload["what_i_went_and_got"][0]["ponder"]["memories"]
+        return json.dumps({"reply": "answered",
+                           "memory_evidence_used": [got[0]["ref"]]})
+
+    providers.set_chat_stub(fake)
+    try:
+        out = pipeline.run_turn("which colour should the button be?")
+    finally:
+        providers.set_chat_stub(None)
+
+    fetched = rounds[1]["what_i_went_and_got"][0]["ponder"]["memories"]
+    assert fetched, "the ponder returned nothing to test"
+    assert all(m["ref"] for m in fetched), "a pondered memory had no ref"
+    assert not any("ungrounded" in w for w in out["warnings"]), out["warnings"]
+
+
+def test_the_deliberation_loop_reports_what_it_delivered(temp_db):
+    """The citation gate's `delivered` set was built once, at stage 1, so a
+    memory the assistant asked for and RECEIVED during the turn was stripped
+    from its own citations as though invented.
+
+    Asserted on `_gather`'s contract rather than end-to-end: with a small bank
+    every row is in the recent buffer and therefore already delivered, so an
+    integration test passes whether or not the mid-turn path works. That is
+    the shape of test that let this survive — one that cannot fail for the
+    reason it was written."""
+    import memory
+    memory.add_memory("semantic", "told", 0.8,
+                      "the deploy pipeline runs on buildkite", turn_idx=0,
+                      event_key="ev:buildkite")
+    step, delivered = pipeline._gather({"ponder": "deploy pipeline"},
+                                       turn_idx=5, session_id=1,
+                                       run=pipeline._UNOBSERVED, warnings=[])
+    assert step["ponder"]["returned"] >= 1
+    assert "ev:buildkite" in delivered
+    assert {m["ref"] for m in step["ponder"]["memories"]} <= delivered

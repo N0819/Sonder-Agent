@@ -1463,6 +1463,43 @@ def fold_threads(threads, at_turn, previous=()):
     return out
 
 
+def close_threads(texts, turn_idx):
+    """Retire threads the turn has just answered. Returns {closed, unknown}.
+
+    NOTHING RE-READ CURRENT STATE. Threads were written once and only a
+    consolidator — which runs every CONSOLIDATE_EVERY_TURNS turns — could ever
+    drop one, so a question answered in the very payload that carried it went
+    on being asked for up to ten more turns. Two threads were observed being
+    answered by fields sitting beside them in the same payload.
+
+    Matched on the thread's own text rather than an index, for the reason
+    `chunks.expand` reports unknown ids: a positional handle silently closes
+    the wrong thread when the list shifts, and the wrong closure is invisible
+    while an unmatched string can be reported.
+
+    The row's EMBEDDING is deliberately not recomputed. It is a retrieval aid
+    over the window's prose, this runs inside the commit transaction, and an
+    embedding call there would put a network round trip inside the one lock
+    the whole design keeps short. A vector still carrying a closed thread
+    makes the window slightly easier to surface, never harder — the safe
+    direction for the error to point."""
+    row = q("SELECT id, end_turn_idx, unresolved_threads FROM memory_summaries "
+            "WHERE scope=? ORDER BY end_turn_idx DESC, id DESC",
+            (SCOPE_FIRSTHAND,), one=True)
+    wanted = {" ".join(str(t or "").split()) for t in (texts or [])}
+    wanted.discard("")
+    if row is None or not wanted:
+        return {"closed": [], "unknown": sorted(wanted)}
+    threads = fold_threads(_json_list(row["unresolved_threads"]),
+                           row["end_turn_idx"])
+    keep = [t for t in threads if t["thread"] not in wanted]
+    closed = [t["thread"] for t in threads if t["thread"] in wanted]
+    if closed:
+        qi("UPDATE memory_summaries SET unresolved_threads=? WHERE id=?",
+           (json.dumps(keep, ensure_ascii=False), row["id"]))
+    return {"closed": closed, "unknown": sorted(wanted - set(closed))}
+
+
 def _summary_retrieval_text(summary, key_phrases, unresolved_threads):
     return "\n".join(p for p in (summary or "",
                                  ", ".join(key_phrases or []),

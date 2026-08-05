@@ -272,3 +272,39 @@ def test_the_turn_payload_carries_the_tally(temp_db):
     entry = seen["open_research"][0]
     assert entry["evidence"] == {"supports": 1}
     assert entry["last_moved_turn"] == 1
+
+
+def test_the_prior_travels_with_the_confidence(temp_db):
+    """The tally alone was not enough. Three hypotheses at 0.545 with
+    `supports: 1` apiece still read as "unmoved by evidence that supports
+    them", because nothing in the payload said what they had moved FROM. A
+    confidence is only legible against its prior."""
+    import json
+
+    import pipeline
+    import providers
+
+    hid = research.open_hypothesis("a question", turn_idx=1)["id"]
+    assert research.get_hypothesis(hid)["confidence"] == research.PRIOR_CONFIDENCE
+    research.record_evidence(hid, url="https://example.com/a", title="a",
+                             excerpt="supporting", stance="supports",
+                             turn_idx=1)
+    seen = {}
+
+    def capture(system, user):
+        payload = json.loads(user)
+        if "user_message" in payload:
+            seen.update(payload)
+            return json.dumps({"reply": "ok"})
+        return json.dumps({"summary": "", "received_summary": "",
+                           "surmise_summary": "", "key_phrases": [],
+                           "unresolved_threads": []})
+
+    providers.set_chat_stub(capture)
+    try:
+        pipeline.run_turn("anything")
+    finally:
+        providers.set_chat_stub(None)
+    entry = seen["open_research"][0]
+    assert entry["opened_at"] == research.PRIOR_CONFIDENCE
+    assert entry["confidence"] > entry["opened_at"], "the move is invisible"

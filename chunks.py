@@ -419,7 +419,16 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
         # Named, not counted. "3 files were skipped" tells a reader something
         # is missing and not whether it is the one they are about to
         # conclude does not exist.
+        #
+        # And the LIST is capped where the count is not, so past 40 the two
+        # disagree — a reader counting entries in this array comes up short.
+        # That is the module's own defect reappearing inside the fix for it,
+        # which is why it is stated rather than left to be noticed.
         **({"not_indexed": dropped} if dropped else {}),
+        **({"not_indexed_is_partial":
+            f"{len(dropped)} of {index.get('skipped_count')} listed; "
+            "read the count, not the length of the list"}
+           if len(dropped) < int(index.get("skipped_count") or 0) else {}),
         **({"expanded": expand(session_id, expand_ids)} if expand_ids else {}),
         "how_to_use_this": (
             "A LIST, not the material. Each entry is a gist and an id; the "

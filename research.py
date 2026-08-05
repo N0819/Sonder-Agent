@@ -70,6 +70,14 @@ RESEARCH_MAX_ROUNDS = 16
 CONCLUDE_CONFIDENCE = 0.6
 
 
+# Where every hypothesis starts. Named rather than spelled 0.3 inline,
+# because a confidence is only readable against the prior it moved from: two
+# hypotheses at 0.545 read as a shared default until you can see that both
+# opened at 0.3 and each took one supporting step. The payload carries this
+# number for exactly that reason.
+PRIOR_CONFIDENCE = 0.3
+
+
 def _clamp(v, lo=0.0, hi=1.0):
     try:
         return max(lo, min(hi, float(v)))
@@ -78,14 +86,14 @@ def _clamp(v, lo=0.0, hi=1.0):
 
 
 def open_hypothesis(question, turn_idx, session_id=None):
-    """A question under investigation starts at 0.3, not 0.5: an unresearched
-    hypothesis leans toward "I do not know yet", and the asymmetry means
-    supporting evidence must actually arrive before the statement reads as
-    likely."""
+    """A question under investigation starts at PRIOR_CONFIDENCE, not 0.5: an
+    unresearched hypothesis leans toward "I do not know yet", and the
+    asymmetry means supporting evidence must actually arrive before the
+    statement reads as likely."""
     hid = qi("INSERT INTO hypotheses(session_id,question,statement,confidence,"
              "status,created_turn,updated_turn) VALUES(?,?,?,?,?,?,?)",
-             (session_id, str(question or "").strip(), "", 0.3, "open",
-              turn_idx, turn_idx))
+             (session_id, str(question or "").strip(), "", PRIOR_CONFIDENCE,
+              "open", turn_idx, turn_idx))
     return get_hypothesis(hid)
 
 

@@ -129,10 +129,14 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
     instead of quietly assuming memory had the answer. That is the difference
     between a loop that converges and one that repeats itself.
 
-    Returns `(out, deliberation)`."""
+    Returns `(out, deliberation, delivered)` — `delivered` being the memory
+    refs this stage handed over MID-TURN. They have to reach the citation gate
+    or the assistant is given material it is then forbidden to cite, which is
+    indistinguishable from not having looked."""
     system = prompts.render(prompts.RESPOND_SYSTEM,
                             persona=persona.persona_prompt(persona_sheet))
     deliberation = []
+    delivered = set()
     out = None
     for round_no in range(1, DELIBERATION_MAX_ROUNDS + 1):
         run.halted()
@@ -147,31 +151,49 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
                                              json.dumps(body,
                                                         ensure_ascii=False)))
         if out is None:
-            return None, deliberation
+            return None, deliberation, delivered
         more = out.get("need_more")
         if not isinstance(more, dict) or round_no == DELIBERATION_MAX_ROUNDS:
             break
-        step = _gather(more, turn_idx, session_id, run, warnings)
+        step, refs = _gather(more, turn_idx, session_id, run, warnings)
+        delivered |= refs
         if not step:
             break                 # nothing to fetch: the answer it has stands
         deliberation.append(step)
-    return out, deliberation
+    return out, deliberation, delivered
 
 
 def _gather(more, turn_idx, session_id, run, warnings):
     """Fetch what a deliberation round asked for. Deterministic; no judgement
     about whether the request was wise — that is the model's to make and the
-    engine's to bound."""
+    engine's to bound.
+
+    Returns `(step, delivered_refs)`. The refs matter as much as the material:
+    a memory handed over mid-turn that the citation gate has never heard of is
+    a memory the assistant cannot use, and the gate is right to strip it."""
     step = {}
+    delivered = set()
     query = str(more.get("ponder") or "").strip()
     if query:
         run.emit("ponder", query=query)
         rows = memory.search_memories(query, k=PONDER_RECALL_LIMIT,
                                       current_turn_idx=turn_idx)
+        # `event_key` IS the ref, everywhere. This read `r.get("ref")`, which
+        # is not a key any memory row has ever carried, so every pondered
+        # memory arrived as `ref: null` — ten of them in one measured turn.
+        # Under the citation rule a memory that cannot be named cannot be
+        # used, so the whole mid-turn ponder lane returned material the
+        # assistant then had to answer as though it had never seen.
+        #
+        # It failed silently in both directions: `.get` on a missing key is
+        # None rather than an error, and a null ref reads as "this memory
+        # happens not to have one" rather than "the lane is broken".
+        delivered |= {str(r.get("event_key") or "") for r in rows
+                      if r.get("event_key")}
         step["ponder"] = {
             "query": query,
             "returned": len(rows),
-            "memories": [{"ref": r.get("ref"),
+            "memories": [{"ref": r.get("event_key") or "",
                           "gist": str(r.get("gist") or r.get("content")
                                       or "")[:200]} for r in rows],
             # Said explicitly, because "no memories" and "I forgot to look"
@@ -212,7 +234,7 @@ def _gather(more, turn_idx, session_id, run, warnings):
         step["search"] = {"query": search_query, "results": results,
                           **({"nothing_found": True} if not results else {})}
         run.emit("search", query=search_query, results=len(results))
-    return step
+    return step, delivered
 
 
 class _Unobserved:
@@ -324,6 +346,11 @@ def run_turn(user_text, session_id=None, run=None):
         "open_research": [
             {"question": h["question"], "status": h["status"],
              "confidence": h["confidence"],
+             # The prior travels too. The tally alone was not enough: three
+             # hypotheses at 0.545 with `supports: 1` apiece still read as
+             # "unmoved by evidence that supports them", because nothing in
+             # the payload said what they had moved FROM.
+             "opened_at": research.PRIOR_CONFIDENCE,
              "evidence": research.evidence_tally(h["id"]),
              "last_moved_turn": h["updated_turn"]}
             for h in research.list_hypotheses(status="open", limit=5)],
@@ -352,8 +379,13 @@ def run_turn(user_text, session_id=None, run=None):
     run.halted()
     if chat_configured():
         try:
-            out, deliberation = _deliberate(payload, persona_sheet, turn_idx,
-                                            session_id, run, warnings)
+            out, deliberation, mid_turn_refs = _deliberate(
+                payload, persona_sheet, turn_idx, session_id, run, warnings)
+            # The gate's definition of "delivered" has to include what the
+            # deliberation loop went and fetched. It was fixed at stage 1, so
+            # a memory the assistant asked for and received DURING the turn
+            # was stripped from its own citations as if invented.
+            delivered |= mid_turn_refs
             if deliberation:
                 trace["deliberation"] = deliberation
             if out is None:
@@ -741,6 +773,20 @@ def run_turn(user_text, session_id=None, run=None):
                         f"Refs: {', '.join(outcome['retired'][:12])}",
                         turn_idx=turn_idx, session_id=session_id,
                         event_key=f"turn:{turn_idx}:retirement")
+        # A thread the turn answered is closed by the turn that answered it.
+        # Waiting for the consolidator meant a question could go on being
+        # asked for ten more turns after the payload beside it had settled
+        # it — the same append-only staleness as the summary prose, one level
+        # down. Quoted text, not an index, and what does not match is said.
+        closing = out.get("resolved_threads")
+        if isinstance(closing, list) and closing:
+            outcome = memory.close_threads([str(t) for t in closing][:12],
+                                           turn_idx)
+            if outcome["closed"]:
+                trace["closed_threads"] = outcome["closed"]
+            for miss in outcome["unknown"]:
+                warnings.append(
+                    f"no open thread matched {miss[:60]!r}; nothing closed")
         dispute = out.get("dispute")
         if isinstance(dispute, dict) and str(
                 dispute.get("reading") or "").strip():
