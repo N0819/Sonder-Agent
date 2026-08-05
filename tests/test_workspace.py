@@ -247,3 +247,27 @@ def test_listing_a_file_says_to_read_it_instead(ws):
     workspace.store_upload(1, "a.py", b"x = 1")
     out = workspace.list_dir("a.py")
     assert out["ok"] is False and "expand its chunks" in out["error"]
+
+
+def test_an_archive_folder_gives_up_its_prose_and_nothing_else(ws):
+    """`chunks` has skipped non-prose inside a recorded-run folder since the
+    day it was told to; this walk never learned it. Measured on the real
+    workspace: one 2.4 MB story JSON took 29% of the whole byte budget while
+    the engine's 300 test files got NONE of it, and the subagent that walked
+    the result reported the project had no test suite. Two spellings of one
+    rule, and the one governing what a subagent can see was the one missing
+    it."""
+    workspace.store_upload(1, "live.py", b"x = 1")
+    root = workspace.session_root(1)
+    os.makedirs(os.path.join(root, "demos"), exist_ok=True)
+    with open(os.path.join(root, "demos", "run.json"), "w") as fh:
+        fh.write('{"beats": []}')
+    with open(os.path.join(root, "demos", "audit.md"), "w") as fh:
+        fh.write("# what the run recorded")
+    snapshot = workspace.snapshot_for_sandbox(1)
+    assert "live.py" in snapshot
+    assert os.path.join("demos", "audit.md") in snapshot, "prose is the useful half"
+    assert os.path.join("demos", "run.json") not in snapshot
+    # Withheld, not vanished: the rule is a decision the reader must be able
+    # to see, or it is indistinguishable from the file not existing.
+    assert "run.json" in snapshot[workspace.WITHHELD_MANIFEST]

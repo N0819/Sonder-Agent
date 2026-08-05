@@ -731,7 +731,18 @@ SNAPSHOT_BINARY_MAX = 2 << 20
 WITHHELD_MANIFEST = "_withheld_from_this_workspace.md"
 
 
-def snapshot_for_sandbox(session_id, max_bytes=8 << 20, max_files=200,
+# THE BYTE CEILING IS THE HONEST CONSTRAINT; the file count was costing
+# coverage it was not buying anything for. Measured on a 593-file workspace
+# holding two repositories: at 200 files the snapshot delivered 6.2 MB and 27
+# of the engine's test files; raising the count alone delivered 404 files,
+# 230 test files, and 8.4 MB — the same ceiling, reached properly. Past 600
+# the number changes nothing at all, because bytes bind first. So the count
+# stays only as a backstop against a workspace of a million tiny files.
+SNAPSHOT_MAX_FILES = 2000
+
+
+def snapshot_for_sandbox(session_id, max_bytes=8 << 20,
+                         max_files=SNAPSHOT_MAX_FILES,
                          binary_max=SNAPSHOT_BINARY_MAX):
     """The workspace as a {relative_path: text-or-bytes} dict `sandbox.run`
     accepts, TOGETHER WITH what it could not bring.
@@ -767,6 +778,18 @@ def snapshot_for_sandbox(session_id, max_bytes=8 << 20, max_files=200,
             continue
         if total >= max_bytes:
             withheld.append((path, "past the total size ceiling"))
+            continue
+        # AN ARCHIVE IS NOT A LIVE CODEBASE, AND THE SAME RULE THE INDEX
+        # APPLIES HAS TO APPLY HERE. `chunks` has skipped non-prose inside a
+        # recorded-run folder since the day it was told to; this walk never
+        # learned it, and one 2.4 MB story JSON took 29% of the whole byte
+        # budget while the engine's 300 test files got NONE of it. Two
+        # spellings of one rule, and the one that governs what a subagent can
+        # actually see was the one missing it.
+        if in_archive_dir(path) and not path.lower().endswith(
+                (".md", ".markdown", ".rst", ".txt")):
+            withheld.append((path, "recorded run — only prose is taken from "
+                                   "an archive folder"))
             continue
         full = os.path.join(root, path)
         try:
