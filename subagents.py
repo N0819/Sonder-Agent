@@ -1223,6 +1223,12 @@ def _seed(root, files):
             continue
         os.makedirs(os.path.dirname(target), exist_ok=True)
         try:
+            # A child gets the same workspace an experiment gets, binaries
+            # included — otherwise the two disagree about what exists.
+            if isinstance(text, (bytes, bytearray)):
+                with open(target, "wb") as handle:
+                    handle.write(text)
+                continue
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(text)
         except OSError:

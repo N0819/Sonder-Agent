@@ -299,6 +299,14 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
             # rule 3 again.
             try:
                 os.makedirs(os.path.dirname(target), exist_ok=True)
+                # BYTES ARRIVE AS BYTES. A text-only writer turned a SQLite
+                # database into the literal characters `b'SQLite format 3...'`,
+                # so a suite that opens one failed at its first query and the
+                # experiment recorded a fault in the project under test.
+                if isinstance(contents, (bytes, bytearray)):
+                    with open(target, "wb") as handle:
+                        handle.write(contents)
+                    continue
                 with open(target, "w", encoding="utf-8") as handle:
                     handle.write("" if contents is None else str(contents))
             except (OSError, TypeError, ValueError) as exc:

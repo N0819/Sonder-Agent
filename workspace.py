@@ -720,29 +720,96 @@ def codemap_for(session_id, max_files=80):
     return codemap.for_prompt(session_root(session_id), max_files=max_files)
 
 
-def snapshot_for_sandbox(session_id, max_bytes=8 << 20, max_files=200):
-    """The workspace as a {relative_path: text} dict `sandbox.run` accepts.
+# A binary file travels as bytes, per-file bounded. The sandbox contract was
+# text-only, which meant a SQLite database could never reach an experiment —
+# so "run this project's suite" against any project that keeps state on disk
+# failed at the first query with `no such table`, and the failure looked like
+# a defect in the project under test rather than a file that never arrived.
+SNAPSHOT_BINARY_MAX = 2 << 20
+# Where the snapshot declares itself. A leading underscore and a full sentence
+# for a name, because it shares a namespace with the user's own files.
+WITHHELD_MANIFEST = "_withheld_from_this_workspace.md"
 
-    Binary and oversized files are skipped rather than mangled: the sandbox
-    contract is text files, and a silently corrupted binary is worse than an
-    absent one."""
+
+def snapshot_for_sandbox(session_id, max_bytes=8 << 20, max_files=200,
+                         binary_max=SNAPSHOT_BINARY_MAX):
+    """The workspace as a {relative_path: text-or-bytes} dict `sandbox.run`
+    accepts, TOGETHER WITH what it could not bring.
+
+    ABSENCE FROM THE SANDBOX IS NOT ABSENCE FROM THE REPOSITORY, and until
+    this said so nothing downstream could tell the two apart. The caps are
+    real and have to be: `list_files` is newest-first, so what a child
+    receives is a 200-file window ordered by modification time — for an
+    unpacked archive that ordering is arbitrary. A deep subagent was given a
+    591-file tree, received 200, walked what it had, found no `tests/`
+    directory, and reported that the project HAS NO TEST SUITE — with a
+    recursive walk, a root listing and a pytest run as evidence, all of them
+    honest, all of them about a workspace that was three-quarters absent. It
+    went on to reason about why the suite had been "stripped". The tree has
+    300 test files.
+
+    A cap is not the defect. A cap nobody downstream can see is: every
+    observation drawn inside the sandbox silently changes meaning, and no
+    amount of care by the reader recovers it. So the omission travels WITH
+    the files, as one more file, rather than as a return value each caller
+    would have to remember to look at (AGENTS.md: a guard that must be
+    remembered will be forgotten). Both callers write this dict to disk, so
+    the child reads the manifest exactly where it would look for the code."""
     root = session_root(session_id)
-    out, total = {}, 0
+    out, total, withheld = {}, 0, []
     for entry in list_files(session_id):
-        if len(out) >= max_files or total >= max_bytes:
-            break
-        full = os.path.join(root, entry["path"])
+        path = entry["path"]
+        # `continue`, NOT `break`. Stopping at the cap was what made the
+        # count unknowable: the loop that hit the ceiling was also the only
+        # thing that could have said how far past it the workspace went.
+        if len(out) >= max_files:
+            withheld.append((path, f"past the {max_files}-file ceiling"))
+            continue
+        if total >= max_bytes:
+            withheld.append((path, "past the total size ceiling"))
+            continue
+        full = os.path.join(root, path)
         try:
-            with open(full, "rb") as handle:
-                raw = handle.read(max_bytes - total + 1)
-        except OSError:
+            raw = open(full, "rb").read(max_bytes - total + 1)
+        except OSError as exc:
+            withheld.append((path, f"could not be read: {exc.strerror}"))
             continue
-        if b"\x00" in raw[:8192]:
-            continue
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        out[entry["path"]] = text
+        binary = b"\x00" in raw[:8192]
+        if not binary:
+            try:
+                out[path] = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                binary = True
+        if binary:
+            if len(raw) > binary_max:
+                withheld.append((path, "binary, over the per-file size limit"))
+                continue
+            out[path] = raw
         total += len(raw)
+    if withheld:
+        out[WITHHELD_MANIFEST] = _withheld_note(len(out), withheld)
     return out
+
+
+def _withheld_note(delivered, withheld):
+    """The manifest. Written to be read by something that is about to
+    conclude a file does not exist."""
+    shown = withheld[:60]
+    lines = [
+        "# Files NOT in this workspace",
+        "",
+        f"This workspace holds {delivered} of {delivered + len(withheld)} "
+        "files from the source tree. The rest were withheld by size and count "
+        "limits, listed below.",
+        "",
+        "**A path missing from here may still exist in the real tree.** Do "
+        "not conclude that a file, a directory or a whole test suite is "
+        "absent from the project because a listing or a recursive walk inside "
+        "this workspace did not find it. Say what you searched and say that "
+        "the workspace is partial.",
+        "",
+    ]
+    lines += [f"- `{path}` — {why}" for path, why in shown]
+    if len(withheld) > len(shown):
+        lines.append(f"- …and {len(withheld) - len(shown)} more")
+    return "\n".join(lines) + "\n"

@@ -136,13 +136,45 @@ def test_an_oversized_upload_is_refused_with_a_reason(ws):
     assert out["ok"] is False and "limit" in out["error"]
 
 
-def test_binary_files_are_skipped_rather_than_mangled(ws):
-    """The sandbox contract is text files; a silently corrupted binary is
-    worse than an absent one."""
+def test_a_binary_file_travels_whole_rather_than_being_dropped(ws):
+    """A silently corrupted binary is worse than an absent one — which is why
+    these were skipped — but an absent one broke the case that matters:
+    a SQLite database could never reach a sandbox, so "run this project's
+    suite" failed at the first query with `no such table` on any project that
+    keeps state on disk, and the experiment recorded the fault against the
+    project under test."""
     workspace.store_upload(1, "a.py", b"print('hi')")
-    workspace.store_upload(1, "b.bin", b"\x00\x01\x02binary")
+    workspace.store_upload(1, "state.db", b"SQLite format 3\x00\x01\x02")
     snapshot = workspace.snapshot_for_sandbox(1)
-    assert "a.py" in snapshot and "b.bin" not in snapshot
+    assert snapshot["a.py"] == "print('hi')"
+    # Bytes, byte-for-byte. `str(raw)` would deliver "b'SQLite format 3...'".
+    assert snapshot["state.db"] == b"SQLite format 3\x00\x01\x02"
+
+
+def test_a_binary_too_large_to_carry_is_named_rather_than_dropped(ws):
+    """Silence is the defect, not the limit."""
+    workspace.store_upload(1, "huge.db", b"\x00" * 4096)
+    snapshot = workspace.snapshot_for_sandbox(1, binary_max=16)
+    assert "huge.db" not in snapshot
+    assert "huge.db" in snapshot[workspace.WITHHELD_MANIFEST]
+
+
+def test_the_workspace_says_what_it_could_not_bring(ws):
+    """A deep subagent was handed a 591-file tree, received the 200 newest,
+    walked what it had, and reported that the project HAS NO TEST SUITE —
+    with a recursive walk, a root listing and a pytest run as evidence, all
+    honest, all about a workspace three-quarters absent. It then reasoned
+    about why the suite had been "stripped". The tree has 300 test files.
+    The cap was never the defect; a cap nothing downstream could see was."""
+    for n in range(12):
+        workspace.store_upload(1, f"f{n}.py", b"x = 1")
+    snapshot = workspace.snapshot_for_sandbox(1, max_files=5)
+    assert len(snapshot) == 6, "five files and the manifest"
+    note = snapshot[workspace.WITHHELD_MANIFEST]
+    # The COUNT is the part a truncating loop cannot report: `break` left the
+    # workspace unable to say how far past the ceiling the tree went.
+    assert "5 of 12" in note
+    assert "may still exist in the real tree" in note
 
 
 # ---- One persistent workspace, navigated a directory at a time ----
