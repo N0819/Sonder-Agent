@@ -563,6 +563,53 @@ def run_turn(user_text, session_id=None, run=None):
     if experiments:
         trace["experiments"] = experiments
 
+    # -- Stage 4c: edits (the durable half of the coding suite) --
+    #
+    # Before this the assistant could reproduce a defect, design a fix and
+    # prove it correct in the sandbox — and then had nowhere to put it, because
+    # `sandbox.run` writes into a directory deleted the moment the run ends.
+    # The deliverable of a coding turn is a changed file and a diff somebody
+    # can review; neither existed, so the loop terminated in an opinion.
+    #
+    # AFTER the experiments deliberately. An edit naming a hypothesis is gated
+    # on that hypothesis having been observed failing, and running the
+    # reproduction in the same turn as the fix is the ordinary case — so the
+    # gate has to read a table the experiments above have already written.
+    edits = []
+    for spec in (out.get("edit_files") or [])[:8]:
+        if not isinstance(spec, dict):
+            continue
+        path = str(spec.get("path") or "").strip()
+        if not path or spec.get("contents") is None:
+            warnings.append("dropped an edit with no path or no contents")
+            continue
+        target = spec.get("hypothesis_id")
+        if target is None and str(spec.get("fixes") or "").strip() and experiments:
+            target = experiments[-1]["hypothesis_id"]
+        try:
+            done = coding.apply_edit(
+                path, spec.get("contents"), turn_idx=turn_idx,
+                hypothesis_id=int(target) if target is not None else None,
+                why=str(spec.get("why") or "")[:200], session_id=session_id)
+        except Exception as exc:
+            warnings.append(f"edit harness failed: {str(exc)[:200]}")
+            continue
+        if not done["ok"]:
+            warnings.append(f"edit refused for {path}: {done['why']}")
+            continue
+        run.emit("edit", path=done["path"], created=done["created"],
+                 rechunked=done["rechunked"])
+        edits.append({k: done[k] for k in
+                      ("path", "diff", "created", "unchanged", "rechunked")})
+    if edits:
+        # The DIFF goes in the trace, not a line count. An edit reported as
+        # "wrote 812 lines" is unreviewable — the reader has to hold both
+        # versions to find the change, which is the work the diff exists to do.
+        trace["edits"] = edits
+        warnings.append(
+            "edited " + ", ".join(e["path"] for e in edits)
+            + " — the diffs are in this turn's reasoning trail")
+
     # -- Stage 4b: subagents (only when the user has allowed one) --
     #
     # Deliberately BEFORE the commit and outside it: a subagent is a network

@@ -121,16 +121,59 @@ def _observation_text(result):
     return (head + " — " + " | ".join(streams)) if streams else head
 
 
+# pytest's documented exit codes. 1 is a FINDING — tests ran and failed, which
+# is exactly what an experiment is for. Everything above it means the run never
+# reached the hypothesis.
+_PYTEST_HARNESS_EXITS = {
+    2: "the test run was interrupted before it finished collecting",
+    3: "an internal pytest error",
+    4: "pytest was invoked wrongly",
+    5: "no tests were collected, so nothing was tested",
+}
+
+
+def _expected_paths(expect):
+    """Files a prediction talks about, so the runner knows to read them back.
+
+    Derived from the prediction rather than named separately by the caller.
+    A second field the model must remember to fill is a field it will
+    eventually forget, and the failure would be a file predicate silently
+    judged against an absent file."""
+    paths = []
+    for key in ("file_contains", "file_equals", "file_lacks"):
+        spec = expect.get(key)
+        if isinstance(spec, dict):
+            paths.extend(str(p) for p in spec)
+    return sorted(set(paths))
+
+
 def judge(result, expect):
     """Did the observation match the prediction?
 
     `expect` is a dict, and every key present must hold:
 
         exit_zero      True/False   the command succeeded / failed
+        exit_code      int          the exact status, when zero/non-zero is
+                                    too coarse to state what you predicted
         stdout_has     substring    appears in stdout
         stdout_lacks   substring    does NOT appear in stdout
+        stdout_matches regex        matches stdout (re.search)
         stderr_has     substring
+        stderr_lacks   substring
         output_equals  exact stripped stdout
+        file_contains  {path: substring}   in a file the run left behind
+        file_lacks     {path: substring}
+        file_equals    {path: exact stripped contents}
+
+    THE VOCABULARY IS THE CEILING ON WHAT CAN BE INVESTIGATED. Every claim an
+    experiment can ever make has to be expressible here, and with five keys
+    the honest ones were unreachable: "the patch applied and the file now
+    reads X" could only be approximated by having the program print the file
+    back, which tests the print statement alongside the patch. The file
+    predicates are the ones that make a durable edit checkable.
+
+    Additive by construction — each key is read only when present, so a
+    prediction written against the old vocabulary is graded identically.
 
     Deliberately mechanical. A prediction a model grades itself against is not
     a prediction, and the whole value of this module is that the grading
@@ -138,6 +181,22 @@ def judge(result, expect):
     """
     if result.get("exit_code") is None and not result.get("timed_out"):
         return OUTCOME_INCONCLUSIVE, "the command never ran"
+    # THE SHARPEST INSTRUMENT WAS THE ONE MOST OFTEN MISGRADED, and the cue
+    # scan below could never have caught it: pytest writes collection errors
+    # to STDOUT and leaves stderr completely empty, so a test module that
+    # cannot import came back exit 2, stderr "", and was graded a REFUTATION
+    # of whatever hypothesis it was testing — confidence down and the
+    # reproduce-before-you-fix gate open, on a tooling failure. Reproduced
+    # before it was fixed: `import definitely_not_a_real_module` in a test
+    # file, judged `refuted` against `{"exit_zero": True}`.
+    #
+    # A documented exit code beats a substring search over the wrong stream.
+    # Where the engine can decide, it decides.
+    if result.get("harness") == "pytest":
+        why = _PYTEST_HARNESS_EXITS.get(result.get("exit_code"))
+        if why:
+            return (OUTCOME_INCONCLUSIVE,
+                    f"the test harness did not run the hypothesis: {why}")
     # A broken harness says nothing about the hypothesis. The program under
     # test produced no output of its own and the interpreter complained about
     # its own ability to run: that is the tool failing, and folding it into
@@ -168,10 +227,64 @@ def judge(result, expect):
         needle = str(expect["stderr_has"])
         checks.append((needle in (result.get("stderr") or ""),
                        f"expected {needle!r} in stderr"))
+    if "exit_code" in expect:
+        try:
+            want_code = int(expect["exit_code"])
+        except (TypeError, ValueError):
+            return (OUTCOME_INCONCLUSIVE,
+                    f"exit_code must be an integer, got "
+                    f"{expect['exit_code']!r}")
+        checks.append((result.get("exit_code") == want_code,
+                       f"expected exit {want_code}, "
+                       f"got {result.get('exit_code')}"))
+    if "stderr_lacks" in expect:
+        needle = str(expect["stderr_lacks"])
+        checks.append((needle not in (result.get("stderr") or ""),
+                       f"expected {needle!r} absent from stderr"))
+    if "stdout_matches" in expect:
+        pattern = str(expect["stdout_matches"])
+        try:
+            rx = re.compile(pattern)
+        except re.error as exc:
+            # A malformed prediction is a broken instrument, not a refutation
+            # — the same rule that keeps a missing interpreter out of
+            # `contradicts`. Grading it against the hypothesis would move
+            # confidence on the strength of a typo.
+            return (OUTCOME_INCONCLUSIVE,
+                    f"the prediction's regex does not compile: {exc}")
+        checks.append((bool(rx.search(result.get("stdout") or "")),
+                       f"expected stdout to match {pattern!r}"))
     if "output_equals" in expect:
         want = str(expect["output_equals"]).strip()
         checks.append(((result.get("stdout") or "").strip() == want,
                        f"expected stdout to equal {want!r}"))
+    # A file predicate against a run that never wrote the file is INCONCLUSIVE,
+    # not refuted. "The file says something else" and "there is no file" are
+    # different findings, and only the first is about the hypothesis.
+    after = result.get("files_after")
+    if after is None:
+        after = {}
+    for key in ("file_contains", "file_lacks", "file_equals"):
+        spec = expect.get(key)
+        if not isinstance(spec, dict):
+            continue
+        for path, wanted in spec.items():
+            path = str(path)
+            if path not in after:
+                return (OUTCOME_INCONCLUSIVE,
+                        f"the run left no {path!r} to check, so the "
+                        f"prediction about it was never tested")
+            body = after[path]
+            if key == "file_contains":
+                checks.append((str(wanted) in body,
+                               f"expected {str(wanted)!r} in {path!r}"))
+            elif key == "file_lacks":
+                checks.append((str(wanted) not in body,
+                               f"expected {str(wanted)!r} absent from "
+                               f"{path!r}"))
+            else:
+                checks.append((body.strip() == str(wanted).strip(),
+                               f"expected {path!r} to equal {str(wanted)!r}"))
     if not checks:
         # No prediction is not a passing prediction.
         return OUTCOME_INCONCLUSIVE, "no prediction was stated"
@@ -209,7 +322,8 @@ def run_experiment(hypothesis_id, *, source, expect, turn_idx,
     if command is None:
         command = [sys.executable, "-s", "main.py"]
     result = sandbox.run(payload, command,
-                         timeout=timeout or sandbox.DEFAULT_TIMEOUT)
+                         timeout=timeout or sandbox.DEFAULT_TIMEOUT,
+                         collect=_expected_paths(expect))
 
     outcome, why = judge(result, expect)
     digest = _digest(hypothesis_id, source, command, expect, payload)
@@ -228,10 +342,17 @@ def run_experiment(hypothesis_id, *, source, expect, turn_idx,
             f"the same experiment produced {prior['outcome']!r} before and "
             f"{outcome!r} now — the behaviour under test is not deterministic")
 
-    qi("INSERT INTO experiments(hypothesis_id,digest,source,command,expect,"
-       "outcome,observation,note,turn_idx,created) "
-       "VALUES(?,?,?,?,?,?,?,?,?,?)",
-       (hypothesis_id, digest, source[:8000], json.dumps(command),
+    # THE ARCHIVE SAYS WHEN IT IS A PARTIAL COPY. `source[:8000]` stored a
+    # program that was not the one executed, with nothing anywhere saying so —
+    # for anything file-sized, a reviewer reading the record back sees a
+    # truncated script and no reason to doubt it. Same defect class as a
+    # `skipped` list capped at 40 beside a true `skipped_count`. The
+    # truncation stays (the row is a record, not a filesystem); what changes
+    # is that the record admits it.
+    qi("INSERT INTO experiments(hypothesis_id,digest,source,source_chars,"
+       "command,expect,outcome,observation,note,turn_idx,created) "
+       "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+       (hypothesis_id, digest, source[:8000], len(source), json.dumps(command),
         json.dumps(expect), outcome, observation[:4000], str(note)[:400],
         turn_idx, time.time()))
 
@@ -347,6 +468,64 @@ def _failing_since(hypothesis_id, row_id):
                 and expect.get("exit_zero") is False):
             return True
     return False
+
+
+def apply_edit(path, contents, *, turn_idx, hypothesis_id=None, why="",
+               session_id=None):
+    """Write a change back to the workspace and return the diff for review.
+
+    THE MISSING VERB. Everything else in this module could reproduce a defect,
+    design a fix and prove it correct in the sandbox — and then had nowhere to
+    put it, because `sandbox.run` writes into a directory that is deleted the
+    moment the run ends. A coding suite whose only durable artefact is an
+    opinion about code is a research suite.
+
+    REPRODUCE BEFORE YOU FIX, EXTENDED TO THE THING THAT ACTUALLY CHANGES.
+    When a `hypothesis_id` is given, the same gate `propose_fix` applies holds
+    here: nothing observed failing, no edit. It is optional because not every
+    edit is a fix — writing a new test, or a file the user asked for outright,
+    is not repairing a defect and inventing a defect to justify it would make
+    the gate a ritual. What the gate cannot be is silently skipped, so the
+    return value always says which of the two happened.
+
+    Returns {ok, path, diff, created, rechunked, gated_on}. Never raises for
+    an ordinary refusal: a rejected edit is a finding the assistant has to
+    read and act on, and rule 3 applies to its own tools too."""
+    import chunks
+    import workspace
+
+    if hypothesis_id is not None and not observed_failing(hypothesis_id):
+        return {"ok": False, "path": str(path),
+                "why": "nothing has been observed failing for that "
+                       "hypothesis — reproduce the defect before editing the "
+                       "code that supposedly causes it",
+                "gated_on": hypothesis_id}
+    result = workspace.write_file(path, contents, session_id)
+    if not result.get("ok"):
+        return {"ok": False, "path": str(path),
+                "why": result.get("error") or "the write was refused"}
+    # The map is corrected in the same call that invalidated it.
+    rechunked = chunks.reingest_path(result["path"], session_id or 0)
+    # An edit is something the assistant DID, witnessed, not concluded. The
+    # diff head goes in the memory so that "what did I change and why" is
+    # answerable from recall alone, without reading the file back.
+    head = "\n".join(result["diff"].splitlines()[:24])
+    memory.add_memory(
+        "episodic", "witnessed", 0.75,
+        f"I edited {result['path']} in the workspace"
+        + (f" because {why}" if why else "")
+        + (" (new file)" if result["created"] else "")
+        + f". Diff:\n{head}",
+        gist=f"edited {result['path']}" + (f": {why}" if why else ""),
+        turn_idx=turn_idx, session_id=session_id,
+        event_key=f"edit:{turn_idx}:{result['path']}")
+    return {"ok": True, "path": result["path"], "diff": result["diff"],
+            "created": result["created"], "unchanged": result["unchanged"],
+            "rechunked": rechunked,
+            "gated_on": hypothesis_id,
+            "why": "no reproduction required for this edit"
+                   if hypothesis_id is None else
+                   "a failing observation exists for the hypothesis"}
 
 
 def experiments_for(hypothesis_id, limit=20):

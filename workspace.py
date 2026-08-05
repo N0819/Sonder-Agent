@@ -31,6 +31,7 @@
 # input handling, and "that archive declares 4.5 PB" is a finding the user
 # should read, not a 500.
 
+import difflib
 import os
 import re
 import shutil
@@ -46,6 +47,14 @@ MAX_UPLOAD_BYTES = 64 << 20            # 64 MiB per file
 MAX_WORKSPACE_BYTES = 512 << 20        # 512 MiB per session, everything in
 MAX_EXTRACT_BYTES = 256 << 20          # 256 MiB out of one archive
 MAX_EXTRACT_MEMBERS = 5000
+# What one read may pull into a turn. Far below the upload limit on purpose:
+# this bound is about a model's context, not a disk, and a file above it is
+# what `chunks` exists for.
+MAX_READ_BYTES = 200_000
+# A diff long enough to review is short enough to read. Past this the change
+# is not a patch, it is a rewrite, and the honest report is that it was
+# truncated rather than a wall the reviewer skims.
+MAX_DIFF_LINES = 400
 # 42.zip's outer layer is ~1000x. Legitimate text compresses ~10x, and a big
 # uniform file (a DB dump, a log) can reach 200x honestly, so the line is
 # drawn where the ratio stops being explicable by content.
@@ -87,9 +96,26 @@ def configure(root):
     _migrated = False
 
 
+def root_under(base):
+    """Where a workspace lives given an ASSISTANT_WORKSPACE of `base`.
+
+    EXISTS BECAUSE TWO PLACES COMPUTED IT AND DISAGREED. `subagents` seeded a
+    child's files into `<home>/workspace` and set its ASSISTANT_WORKSPACE to
+    the same path — but this module joins `_WORKSPACE_DIR` onto that, so the
+    child looked in `<home>/workspace/workspace` and found nothing. Every deep
+    subagent ran against an empty workspace: no files, no chunks, no ids to
+    read by, and its honest report was that it had no way to open the code it
+    was sent at. The tool it said it lacked was there; the corpus was not.
+
+    Folded to one function rather than fixed at the one caller who was wrong,
+    per AGENTS.md — a guard that must be remembered will be forgotten, and
+    this one already was."""
+    return os.path.join(base, _WORKSPACE_DIR)
+
+
 def workspace_root():
     """The one persistent workspace directory, created on demand."""
-    path = os.path.join(_ROOT, _WORKSPACE_DIR)
+    path = root_under(_ROOT)
     os.makedirs(path, exist_ok=True)
     _migrate_legacy_sessions(path)
     return path
@@ -216,6 +242,131 @@ def store_upload(session_id, filename, data):
         handle.write(data)
     return {"ok": True, "name": os.path.basename(target),
             "bytes": len(data)}
+
+
+def read_file(relative, session_id=None, limit=MAX_READ_BYTES):
+    """The current text of one workspace file, or an explicit absence.
+
+    Returns {"ok", "text"|"error", "bytes"}. An unreadable file is a RESULT,
+    never an exception — the callers are an edit path and an HTTP route, and
+    both need the reason rather than a traceback."""
+    root = session_root(session_id)
+    target = _resolved_under(root, str(relative or ""))
+    if target is None:
+        return {"ok": False, "error": f"path escapes the workspace: "
+                                      f"{relative!r}"}
+    if not os.path.isfile(target):
+        return {"ok": False, "error": f"no such file: {relative!r}"}
+    try:
+        with open(target, "r", encoding="utf-8") as handle:
+            text = handle.read(limit + 1)
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"ok": False, "error": f"could not read {relative!r}: {exc}"}
+    if len(text) > limit:
+        return {"ok": False,
+                "error": f"{relative!r} is larger than the {limit} character "
+                         "read limit; work on it in chunks"}
+    return {"ok": True, "text": text, "bytes": len(text.encode())}
+
+
+def write_file(relative, contents, session_id=None):
+    """Replace one workspace file's contents, and say exactly what changed.
+
+    THE ASSISTANT COULD NOT CHANGE ANYTHING IT COULD SEE. `sandbox.run` writes
+    into a throwaway directory that is deleted the moment the run ends, and
+    nothing anywhere wrote back to the workspace — so an assistant asked to
+    edit its own source could reproduce a defect, design a fix, prove the fix
+    correct in the sandbox, and then had no way to put it anywhere. The
+    deliverable of a coding turn is a changed file and a reviewable diff, and
+    neither existed.
+
+    Returns {"ok", "path", "created", "diff", "before_bytes", "after_bytes"}.
+
+    UNLIKE `store_upload` THIS DELIBERATELY REPLACES. An upload arriving twice
+    is two files and clobbering the first is a surprise; an edit that wrote
+    `module-1.py` beside `module.py` would leave the tree holding two versions
+    and the map indexing both, which is the failure where an expand returns
+    code that is no longer what runs. The undo is the diff, which is returned
+    rather than merely logged.
+
+    Directories are created as needed and the path is resolved with symlinks
+    followed, so a component that is itself a link out of the tree is refused
+    here rather than discovered afterwards."""
+    text = "" if contents is None else str(contents)
+    if len(text.encode()) > MAX_UPLOAD_BYTES:
+        return {"ok": False, "error": "the new contents exceed the per-file "
+                                      "limit"}
+    root = session_root(session_id)
+    relative = str(relative or "").strip().replace("\\", "/")
+    if not relative:
+        return {"ok": False, "error": "no path given"}
+    # REFUSED, NOT REINTERPRETED. Stripping the leading slash contained the
+    # write — `/etc/passwd` landed at `<workspace>/etc/passwd` — but silently
+    # turned a path the caller meant absolutely into a different path it never
+    # named. A write that goes somewhere other than where it was addressed is
+    # a surprise whichever side of the boundary it lands on, and the caller
+    # cannot see it happened.
+    if relative.startswith("/") or (len(relative) > 1 and relative[1] == ":"):
+        return {"ok": False,
+                "error": f"paths are relative to the workspace; {relative!r} "
+                         "is absolute"}
+    # The parent must resolve inside the workspace even when the file does not
+    # exist yet, so the check is on the directory and then on the whole path.
+    parent = _resolved_under(root, os.path.dirname(relative) or ".")
+    if parent is None:
+        return {"ok": False,
+                "error": f"path escapes the workspace: {relative!r}"}
+    target = os.path.join(parent, os.path.basename(relative))
+    if _resolved_under(root, relative) is None and os.path.exists(target):
+        return {"ok": False,
+                "error": f"path escapes the workspace: {relative!r}"}
+    existed = os.path.isfile(target)
+    before = ""
+    if existed:
+        try:
+            with open(target, "r", encoding="utf-8") as handle:
+                before = handle.read()
+        except (OSError, UnicodeDecodeError):
+            # Present but unreadable as text: the diff would be a lie, so it
+            # says so rather than showing the whole file as an addition.
+            before = ""
+    if (workspace_bytes(session_id) - len(before.encode())
+            + len(text.encode()) > MAX_WORKSPACE_BYTES):
+        return {"ok": False, "error": "this workspace is full"}
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"could not write {relative!r}: {exc}"}
+    return {"ok": True, "path": relative, "created": not existed,
+            "diff": diff_text(before, text, relative),
+            "before_bytes": len(before.encode()),
+            "after_bytes": len(text.encode()),
+            "unchanged": before == text}
+
+
+def diff_text(before, after, path="", context=3):
+    """A unified diff, or a sentence saying there is nothing to show.
+
+    A REVIEWER READS THE DIFF, NOT THE FILE. An edit reported as "wrote 812
+    lines to memory.py" is unreviewable — the reader has to hold both versions
+    to find the change, which is precisely the work the diff exists to do.
+    Truncated at MAX_DIFF_LINES, and it says when it truncated: a diff that
+    silently stops is worse than none, because it reads as the whole change."""
+    lines = list(difflib.unified_diff(
+        (before or "").splitlines(), (after or "").splitlines(),
+        fromfile=f"a/{path}" if path else "before",
+        tofile=f"b/{path}" if path else "after",
+        lineterm="", n=context))
+    if not lines:
+        return "(no change)"
+    if len(lines) > MAX_DIFF_LINES:
+        kept = lines[:MAX_DIFF_LINES]
+        kept.append(f"... diff truncated: {len(lines)} lines total, "
+                    f"{MAX_DIFF_LINES} shown")
+        lines = kept
+    return "\n".join(lines)
 
 
 # Directories that are machinery, not material.

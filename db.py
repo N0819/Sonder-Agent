@@ -24,7 +24,7 @@ _lock = threading.Lock()
 # right answer is to queue, not to fail the turn.
 _BUSY_TIMEOUT = float(os.environ.get("ASSISTANT_DB_TIMEOUT", "10"))
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(
@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS experiments(
     hypothesis_id INTEGER NOT NULL REFERENCES hypotheses(id) ON DELETE CASCADE,
     digest TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
+    source_chars INTEGER NOT NULL DEFAULT 0,
     command TEXT NOT NULL DEFAULT '[]',
     expect TEXT NOT NULL DEFAULT '{}',
     outcome TEXT NOT NULL DEFAULT 'inconclusive',
@@ -403,6 +404,19 @@ def _init(conn):
                 CREATE INDEX IF NOT EXISTS idx_chunks_session
                     ON chunks(session_id, kind);
             """)
+        if version < 5:
+            # `source` has always been stored truncated at 8000 characters
+            # with nothing recording the true size, so a reviewer reading an
+            # experiment back could not tell a short program from a clipped
+            # one. ALTER rather than a rewrite: the existing rows keep their
+            # (partial) source and report 0, which reads as "unknown" — the
+            # honest value for a row written before anyone was counting.
+            try:
+                conn.execute("ALTER TABLE experiments "
+                             "ADD COLUMN source_chars INTEGER NOT NULL "
+                             "DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass          # already present: a fresh DB built from SCHEMA
         if version != SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?) "

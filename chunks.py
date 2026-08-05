@@ -272,6 +272,33 @@ def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
     return total
 
 
+def reingest_path(relative, session_id=WORKSPACE):
+    """Re-chunk one file after it changed on disk. Returns the chunk count.
+
+    A MAP THAT OUTLIVES THE CODE IT DESCRIBES IS WORSE THAN NO MAP. Once the
+    assistant can edit a file, every chunk of that file is a claim about what
+    is there — and `expand` returning the version from before the edit is the
+    failure `put` already guards against for a re-upload, arriving by the new
+    route. Called by the write path rather than left to the caller, because
+    the caller that forgets is the one whose edit silently desynchronises the
+    index."""
+    import os
+
+    import workspace
+    language = codemap.language_of(os.path.basename(str(relative or "")))
+    if not language:
+        return 0
+    got = workspace.read_file(relative, session_id)
+    if not got.get("ok"):
+        # The file is gone or unreadable: drop its chunks rather than leave
+        # them claiming it exists.
+        qi("DELETE FROM chunks WHERE session_id=? AND source_ref=?",
+           (_scope(session_id), str(relative)))
+        return 0
+    return len(put(session_id, "code", str(relative),
+                   split_code(got["text"], language)))
+
+
 def expand(session_id=WORKSPACE, ids=(), budget=MAX_EXPAND_CHARS):
     """Bodies for the ids asked for, in the order asked, within a budget.
 

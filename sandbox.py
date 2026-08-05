@@ -215,8 +215,11 @@ def _kill_tree(proc):
             pass
 
 
+MAX_COLLECT_BYTES = 200_000
+
+
 def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
-        import_paths=()):
+        import_paths=(), collect=()):
     """Write `files` into a throwaway workspace, run `command`, report.
 
     `files` is {relative_path: contents}. `command` is an argv list. Returns a
@@ -232,6 +235,16 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                     finished" and "it finished and failed" are different
                     findings and a caller that conflates them will keep
                     re-running the loop
+        files_after {path: contents} for each path named in `collect`
+
+    `collect` IS THE WHOLE REASON A RUN CAN BE ASKED ABOUT ITS EFFECTS. The
+    workspace is destroyed in the `finally` below, so before this existed the
+    only observable a program had was what it printed — "the patch applied and
+    the file now reads X" could only be checked by having the program print
+    the file back, which tests the print statement as much as the patch. A
+    path that the run did not produce comes back absent from `files_after`
+    rather than empty: absent and empty are different findings, and a
+    predicate over the wrong one is a prediction about nothing.
 
     Never raises for ordinary failure. A crash, a timeout and a missing
     interpreter are all RESULTS -- an experiment that blows up is data, and a
@@ -321,18 +334,44 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
             reader.join(timeout=2)
         out, cut_out = _tail(b"".join(out_chunks))
         err, cut_err = _tail(b"".join(err_chunks))
+        # Read back BEFORE the rmtree below, and after the tree is dead, so a
+        # surviving writer cannot change what is reported.
+        after = _collect(workspace, collect)
         if timed_out:
             return {"ok": False, "exit_code": None, "stdout": out,
                     "stderr": (err
                                + f"\n[timed out after {timeout}s]").strip(),
                     "truncated": True, "seconds": round(elapsed, 3),
-                    "timed_out": True}
+                    "timed_out": True, "files_after": after}
         return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
                 "stdout": out, "stderr": err,
                 "truncated": cut_out or cut_err,
-                "seconds": round(elapsed, 3), "timed_out": False}
+                "seconds": round(elapsed, 3), "timed_out": False,
+                "files_after": after}
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _collect(workspace, paths):
+    """Read named files out of the workspace before it is destroyed.
+
+    Every failure to read is silent ABSENCE rather than an exception or an
+    empty string, for rule 3's reason: a run that crashed before writing its
+    output file is data, and a harness that raises on it teaches the loop to
+    avoid the interesting cases. The path guard is the same one the write side
+    uses — a path in a prediction is untrusted input exactly like a path in
+    `files`."""
+    out = {}
+    for relative in (paths or ()):
+        target = os.path.normpath(os.path.join(workspace, str(relative)))
+        if not target.startswith(workspace + os.sep):
+            continue
+        try:
+            with open(target, "r", encoding="utf-8", errors="replace") as fh:
+                out[str(relative)] = fh.read(MAX_COLLECT_BYTES)
+        except (OSError, ValueError):
+            continue
+    return out
 
 
 def run_python(source, *, extra_files=None, timeout=DEFAULT_TIMEOUT):
@@ -361,9 +400,16 @@ def run_pytest(files, *, timeout=DEFAULT_TIMEOUT):
     # explicitly is what makes it importable without reopening that door --
     # and it has to be named explicitly because HOME points at the
     # workspace, so the interpreter cannot find the real one by itself.
-    return run(files, [sys.executable, "-s", "-m", "pytest", "-q",
-                       "--no-header", "-p", "no:cacheprovider"],
-               timeout=timeout, import_paths=_pytest_path())
+    result = run(files, [sys.executable, "-s", "-m", "pytest", "-q",
+                         "--no-header", "-p", "no:cacheprovider"],
+                 timeout=timeout, import_paths=_pytest_path())
+    # STAMPED HERE, WHERE IT IS KNOWN. pytest's exit codes are documented and
+    # exact — 1 means tests failed, 2/3/4 mean the run never got that far —
+    # and `judge` can only use them if it can tell a pytest run from any other
+    # command. Deriving that downstream by pattern-matching the argv is the
+    # guard that gets forgotten; the caller that built the command says so.
+    result["harness"] = "pytest"
+    return result
 
 
 def _pytest_path():

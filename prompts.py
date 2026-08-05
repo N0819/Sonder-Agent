@@ -101,6 +101,8 @@ Return ONLY a JSON object:
                   "expect": {{"exit_zero": true, "stdout_has": "..."}},
                   "files": {{"lib.py": "..."}}, "note": "..."}}],
   "propose_fix": {{"hypothesis_id": 1, "description": "..."}},
+  "edit_files": [{{"path": "src/thing.py", "contents": "the WHOLE new file",
+                  "why": "...", "hypothesis_id": 1}}],
   "retire": {{"memory_refs": ["event:...", ...], "reason": "..."}},
   "spawn": [{{"kind": "deep|scout", "task": "...",
               "scope": ["path/it/owns.py"]}}],
@@ -123,6 +125,29 @@ enforces whatever you write:
   tell a fix for a defect from a fix for nothing.
 Files the user uploaded are already in the sandbox workspace, so you can run
 against them by name; `files_the_user_gave_me` lists what is there.
+
+`expect` keys, all optional, all checked mechanically — state as many as
+carry real risk of being wrong:
+  exit_zero true/false · exit_code 2 · stdout_has · stdout_lacks ·
+  stdout_matches (regex) · stderr_has · stderr_lacks · output_equals ·
+  file_contains {{"out.txt": "..."}} · file_lacks · file_equals
+The file predicates read files THE RUN LEFT BEHIND, so "the patch applied and
+the file now reads X" is checkable directly instead of via a print statement.
+A prediction about a file the run never wrote is inconclusive, not refuted.
+
+CHANGING FILES. `edit_files` writes back to the workspace — the only verb
+here that outlives the turn. `contents` is the COMPLETE new file, not a patch
+or a fragment: what you send replaces what is there. Read the file first
+(`need_more.expand_chunks`, or `list_dir` to find it) so you are editing what
+is actually on disk rather than what you remember of it.
+- Name a `hypothesis_id` when the edit FIXES something, and the reproduce-
+  before-you-fix gate applies: no observed failure, no edit. Run the
+  experiment that reproduces the defect in the same turn and it will be there.
+- Leave it out when the edit is not a repair — a new file, a test, something
+  the user asked for outright. Do not invent a hypothesis to satisfy the gate;
+  that makes it a ritual and it stops protecting anything.
+- The diff is recorded and shown to the user. An edit you cannot describe in
+  one sentence in `why` is probably two edits.
 
 RETIRING MEMORIES. `retire` sets memories aside as no longer relevant to what
 you are working on now — the schema you replaced, the approach that was

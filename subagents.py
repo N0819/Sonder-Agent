@@ -1065,7 +1065,12 @@ def _run_deep(task, *, session_id=None, context="", turn_idx=0,
         # gist-and-id contract the parent works under. A subagent that reads
         # its whole corpus to answer one question is not cheaper than the
         # parent doing it.
-        _seed(os.path.join(home, "workspace"), snapshot)
+        # `workspace.root_under` rather than a second spelling of the join.
+        # This line and the ASSISTANT_WORKSPACE set below were computing the
+        # same directory two different ways and disagreeing by one level, so
+        # every deep subagent started with an empty workspace and correctly
+        # reported that it could not open the code it was sent at.
+        _seed(workspace.root_under(_child_workspace(home)), snapshot)
     task_payload = {
         "task": task,
         "context": context[:8000],
@@ -1101,7 +1106,7 @@ def _run_deep(task, *, session_id=None, context="", turn_idx=0,
         if secret:
             env[variable] = secret
     env["ASSISTANT_DB"] = os.path.join(home, "subagent.db")
-    env["ASSISTANT_WORKSPACE"] = os.path.join(home, "workspace")
+    env["ASSISTANT_WORKSPACE"] = _child_workspace(home)
     proc = subprocess.Popen(
         [sys.executable, _RUNNER], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
@@ -1152,6 +1157,13 @@ def _provider_config_without_secrets():
     for field, variable in _SUBAGENT_KEY_VARS.items():
         cfg[field] = variable
     return cfg
+
+
+def _child_workspace(home):
+    """The value of the child's ASSISTANT_WORKSPACE. One caller sets the
+    variable, another seeds files under it, and they must agree — so neither
+    spells the path itself."""
+    return os.path.join(home, "workspace")
 
 
 def _seed(root, files):

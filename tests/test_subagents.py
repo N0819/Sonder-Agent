@@ -493,3 +493,60 @@ def test_the_archive_is_bounded(temp_db, tmp_path, monkeypatch):
         subagents.archive_run(str(home), kind=subagents.DEEP, task=f"t{n}",
                               report={}, turn_idx=n, seconds=1.0)
     assert len(subagents.list_archives()) <= 3
+
+
+def test_a_deep_child_can_find_the_files_it_was_seeded(temp_db, tmp_path,
+                                                       monkeypatch):
+    """EVERY DEEP SUBAGENT RAN AGAINST AN EMPTY WORKSPACE. The parent seeded
+    `<home>/workspace` and set the child's ASSISTANT_WORKSPACE to the same
+    path — but `workspace_root()` joins `_WORKSPACE_DIR` onto that, so the
+    child looked one level down and found nothing.
+
+    The symptom was not a missing file. It was a child reporting, honestly and
+    at length, that it had no tool capable of opening local code: with no
+    files there were no chunks, with no chunks there were no ids, and the one
+    read channel it had resolved to nothing. Three subagent runs were spent
+    concluding the tool was absent when the corpus was.
+
+    Asserted against what `_run_deep` ACTUALLY does — the directory it seeds
+    versus the directory the child's own ASSISTANT_WORKSPACE resolves to.
+    A test that computes both sides itself agrees with itself and would have
+    passed throughout."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    monkeypatch.setattr(subagents, "ARCHIVE_ROOT",
+                        str(tmp_path / "subagent-archive"))
+    workspace.store_upload(1, "coding.py", b"def judge():\n    return 1\n")
+    seen = {}
+
+    real_seed = subagents._seed
+
+    def spy_seed(root, files):
+        seen["seeded"] = root
+        return real_seed(root, files)
+
+    class FakeProc:
+        stdin, stdout, returncode = None, None, 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def spy_popen(*args, **kwargs):
+        seen["env"] = kwargs.get("env") or {}
+        return FakeProc()
+
+    monkeypatch.setattr(subagents, "_seed", spy_seed)
+    monkeypatch.setattr(subagents.subprocess, "Popen", spy_popen)
+    monkeypatch.setattr(subagents, "_converse", lambda *a, **kw: None)
+    subagents._run_deep("look at coding.py", session_id=1, turn_idx=1)
+
+    assert seen.get("seeded"), "nothing was seeded"
+    child_root = workspace.root_under(seen["env"]["ASSISTANT_WORKSPACE"])
+    assert seen["seeded"] == child_root, (
+        f"seeded {seen['seeded']} but the child reads {child_root}")
