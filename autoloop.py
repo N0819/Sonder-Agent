@@ -90,6 +90,7 @@ def run_session(text, session_id=None, run=None, run_turn=None,
 
     nxt = str(text or "").strip()
     from_user = True
+    carried = ""
     result = None
     replies = []
     iteration = 0
@@ -103,35 +104,42 @@ def run_session(text, session_id=None, run=None, run_turn=None,
         run.emit("iteration", n=iteration,
                  instruction=nxt[:400], source="user" if from_user else "self")
 
-        result = run_turn(nxt, session_id, run=run)
+        result = run_turn(nxt, session_id, run=run,
+                          speaker="user" if from_user else "self",
+                          carried_plan=carried)
         session_id = result.get("session_id", session_id)
         replies.append({"n": iteration, "reply": result.get("reply") or "",
                         "from_user": from_user})
 
-        # ANYTHING THE USER SAID DURING THE ITERATION OUTRANKS THE PLAN.
-        # `_deliberate` drains the same inbox mid-turn, so this catches what
-        # arrived after the last round — during the commit, or while a
-        # subagent held the turn. Their message becomes the next instruction
-        # outright: a user who interrupts an automation run is redirecting it,
-        # and appending their words to the assistant's own plan would let the
-        # plan it is abandoning still set the agenda.
+        step = str(result.get("continue_work") or "").strip()
+
+        # SPEAKING UP MUST NOT COST THE WORK IN FLIGHT. `_deliberate` drains
+        # the same inbox mid-turn, so what reaches here arrived after the last
+        # round — during the commit, or while a subagent held the turn.
+        #
+        # Their words become the next instruction and the plan is CARRIED
+        # ALONGSIDE, not discarded. Replacing it meant "also, check the tests"
+        # threw away a plan three iterations deep: the user who was paying
+        # attention was punished for it, and the way that failure shows up is
+        # that they stop steering. Whether the interjection actually cancels
+        # the plan is the model's call, made with both in front of it.
         said = [s for s in run.drain_inbox() if s.strip()]
         if said:
-            nxt, from_user = "\n\n".join(said), True
-            stalls = 0
-            previous_step = ""
+            nxt, from_user, carried = "\n\n".join(said), True, step
+            # A message is new information by definition, so nothing about the
+            # iteration before it can be a repetition.
+            stalls, previous_step = 0, ""
             continue
 
-        step = str(result.get("continue_work") or "").strip()
-        if not step:
-            stopped = "finished"
-            break
         if not result.get("respond_ok"):
             # Belt and braces: `run_turn` already blanks `continue_work` when
             # the respond stage failed. Restated here because a loop that can
             # be driven by a provider error is a loop that bills all night for
             # a 429, and this is the file where that would happen.
             stopped = "the respond stage failed"
+            break
+        if not step:
+            stopped = "finished"
             break
 
         if made_progress(result) or _normalise(step) != _normalise(previous_step):
@@ -145,7 +153,7 @@ def run_session(text, session_id=None, run=None, run_turn=None,
                            f"nothing and named the same next step")
                 break
 
-        previous_step, nxt, from_user = step, step, False
+        previous_step, nxt, from_user, carried = step, step, False, ""
 
     run.emit("loop", state="stopped", iterations=iteration, why=stopped)
     if result is None:

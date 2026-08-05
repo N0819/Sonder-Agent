@@ -321,3 +321,79 @@ def test_a_message_sent_mid_turn_is_read_by_the_same_turn(temp_db):
     said = [item for item in rounds[1] if item.get("got") == "the user, mid-turn"]
     assert [s["said"] for s in said] == ["actually, leave that file alone"]
     assert run.drain_inbox() == []          # delivered once, not re-delivered
+
+
+def test_a_self_driven_iteration_is_not_minted_as_something_the_user_said(
+        temp_db):
+    """PROVENANCE CANNOT BE REPAIRED DOWNSTREAM. An automation iteration is
+    driven by the assistant's own `continue_work`, and the episode row for it
+    read "User said: <the assistant's own plan>" — a witnessed memory of words
+    the user never uttered, minted once per iteration and recalled later as
+    fact about them.
+
+    Nothing else could have caught this: the row is well-formed, richly
+    salient, and false. A memory system that can be wrong about WHO SPOKE is
+    worse than one that remembers less."""
+    _stub(respond={"reply": "ran the suite"})
+
+    pipeline.run_turn("run the suite next", speaker="self")
+
+    rows = q("SELECT content FROM memories WHERE kind='episodic'")
+    assert rows, "no episode was minted at all"
+    content = rows[-1]["content"]
+    assert "User said" not in content, content
+    assert "Continuing my own work" in content, content
+
+
+def test_the_user_still_speaks_as_the_user(temp_db):
+    """The other half. A fix that made every episode say "continuing my own
+    work" would be the same defect pointed the other way, and the default
+    path is the one no test would have covered."""
+    _stub(respond={"reply": "hello back"})
+
+    pipeline.run_turn("hello")
+
+    content = q("SELECT content FROM memories WHERE kind='episodic'")[-1]
+    assert content["content"].startswith("User said: hello")
+
+
+def test_an_interjection_arrives_beside_the_plan_not_instead_of_it(temp_db):
+    """STEERING MUST NOT COST THE WORK IN FLIGHT. A mid-run message used to
+    replace the next step outright, so "also, check the tests" threw away a
+    plan three iterations deep — the user who was paying attention was
+    punished for it, and the way that failure shows is that they stop
+    speaking up.
+
+    The engine takes NO view on which wins: "also check X" and "stop, wrong
+    file" arrive through the same channel and only the model can tell them
+    apart."""
+    captured = {}
+
+    def watch(system, user):
+        captured.update(json.loads(user))
+        return json.dumps({"reply": "ok"})
+    providers.set_chat_stub(watch)
+
+    pipeline.run_turn("also, check the tests", speaker="user",
+                      carried_plan="finish rewriting judge()")
+
+    assert captured["user_message"]["text"] == "also, check the tests"
+    assert captured["user_message"]["spoken_by"] == "the user"
+    assert (captured["work_in_progress"]["you_were_about_to"]
+            == "finish rewriting judge()")
+
+
+def test_no_plan_means_no_work_in_progress_key(temp_db):
+    """An empty field fails silently: `you_were_about_to: ""` reads as "you
+    were about to do nothing", which is a claim, and a false one on every
+    ordinary turn."""
+    captured = {}
+
+    def watch(system, user):
+        captured.update(json.loads(user))
+        return json.dumps({"reply": "ok"})
+    providers.set_chat_stub(watch)
+
+    pipeline.run_turn("hello")
+
+    assert "work_in_progress" not in captured

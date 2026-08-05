@@ -432,8 +432,9 @@ async function watchExisting(runId, text) {
   sendBtn.disabled = false;
   sendBtn.textContent = 'Send to run';
   const hint = document.getElementById('running-hint');
-  hint.textContent = 'It is working. Anything you send now reaches it '
-                     + 'mid-turn, at its next round boundary.';
+  hint.textContent = 'It is working. Anything you send reaches it at its next '
+                     + 'round boundary and is folded into what it is already '
+                     + 'doing — it does not cancel the work in flight.';
   hint.style.display = '';
   const haltBtn = document.getElementById('halt');
 

@@ -159,13 +159,20 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
         #
         # Carried in `what_i_went_and_got` rather than by rewriting the
         # original message: the model must be able to tell "you asked me this"
-        # from "you have since said this", because the second usually
-        # overrides the first and it cannot know that if they are merged.
+        # from "you have since said this", and it cannot if they are merged.
+        #
+        # ADDITIONAL, NOT OVERRIDING. The engine takes no view on whether an
+        # interjection cancels the work in flight — "also check the tests" and
+        # "stop, wrong file" arrive through the same channel and only the
+        # model can tell them apart. A rule here would have to guess, and the
+        # cost of guessing wrong is a user who learns not to speak up.
         for said in run.drain_inbox():
             deliberation.append({"got": "the user, mid-turn", "said": said,
                                  "note": "this arrived AFTER the message you "
-                                         "are answering; where the two "
-                                         "conflict, this one is current"})
+                                         "are answering. Fold it into what "
+                                         "you are already doing; abandon that "
+                                         "only if they have actually "
+                                         "redirected you."})
         body = dict(payload)
         if deliberation:
             body["what_i_went_and_got"] = deliberation
@@ -293,9 +300,23 @@ class _Unobserved:
 _UNOBSERVED = _Unobserved()
 
 
-def run_turn(user_text, session_id=None, run=None):
+def run_turn(user_text, session_id=None, run=None, speaker="user",
+             carried_plan=""):
     """One full exchange. Returns {reply, warnings, trace, session_id,
     turn_idx}.
+
+    `speaker` SAYS WHO IS TALKING, and it is not cosmetic. An automation
+    iteration is driven by the assistant's own `continue_work`, and with one
+    speaker the episode row for it read "User said: <the assistant's own
+    plan>" — a witnessed memory of words the user never uttered, minted into
+    the bank every iteration and recalled later as fact about them. A memory
+    system whose provenance can be wrong about WHO SPOKE is worse than one
+    with less memory.
+
+    `carried_plan` is what the assistant was about to do when the user
+    interrupted. Delivered as context beside their message, never merged into
+    it: steering must not silently discard the work in flight, and the model
+    is the only thing that can tell "stop doing that" from "also, note this".
 
     `run` is an optional `turnrun.TurnRun`: it receives a step event per stage
     and is asked, between stages, whether the user has halted. Halting raises
@@ -369,7 +390,28 @@ def run_turn(user_text, session_id=None, run=None):
     payload = {
         "user_message": {"text": str(user_text or ""),
                          "temporal_status": "present",
-                         "ref": "current"},
+                         "ref": "current",
+                         "spoken_by": ("the user" if speaker == "user" else
+                                       "you — this is your own next step from "
+                                       "last iteration, not a new message")},
+        # WHAT YOU WERE ABOUT TO DO, when the user spoke over it.
+        #
+        # Steering must not be an interrupt. Their message used to REPLACE the
+        # next step outright, so "also, check the tests" threw away a plan
+        # three iterations deep — the user paying attention was penalised for
+        # it, which is the opposite of what a steerable run should feel like.
+        #
+        # Carried as context beside their words rather than merged into them,
+        # and the engine takes no view on which wins. Only the model can tell
+        # "stop doing that" from "also, note this", and a rule here would have
+        # to guess at exactly the moment guessing is most expensive.
+        **({"work_in_progress": {
+            "you_were_about_to": carried_plan,
+            "note": "the user spoke while you were working, and their message "
+                    "is `user_message` above. It does not automatically "
+                    "cancel this. Fold it in and carry on where you can; drop "
+                    "the plan only if they have actually redirected you, and "
+                    "say which you did."}} if carried_plan else {}),
         "memory": memory_payload,
         "what_i_believe_about_people_and_topics": user_model,
         "active_hypotheses": sheet_entries,
@@ -707,7 +749,9 @@ def run_turn(user_text, session_id=None, run=None):
     # anything is spent.
     batch, batch_warnings = subagents.spawn_cohort(
         specs, turn_idx=turn_idx, session_id=session_id,
-        context=f"The user asked: {user_text}")
+        context=(f"The user asked: {user_text}" if speaker == "user" else
+                 f"Continuing its own work, the assistant set out to: "
+                 f"{user_text}"))
     warnings.extend(batch_warnings)
     for report in batch:
         warnings.extend(report.get("warnings") or [])
@@ -755,7 +799,17 @@ def run_turn(user_text, session_id=None, run=None):
     # Build + embed the memory batch BEFORE the transaction: embedding is a
     # network round trip and must never hold SQLite's writer.
     to_mint = []
-    exchange = f"User said: {user_text}\nI replied: {reply}"
+    # WHO SPOKE IS PART OF THE MEMORY. An automation iteration is driven by
+    # the assistant's own `continue_work`, and this line minted it as "User
+    # said: <the assistant's own plan>" — a witnessed episode of words the
+    # user never uttered, once per iteration, recalled later as fact about
+    # them. Retrieval cannot repair a row whose provenance is wrong, and
+    # nothing downstream could have caught it: the row is well-formed, richly
+    # salient, and false.
+    exchange = (f"User said: {user_text}\nI replied: {reply}"
+                if speaker == "user" else
+                f"Continuing my own work, I set out to: {user_text}\n"
+                f"I then reported: {reply}")
     to_mint.append(dict(
         kind="episodic", provenance="witnessed",
         salience=_salience_of(exchange), content=exchange,

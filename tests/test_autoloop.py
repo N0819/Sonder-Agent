@@ -23,7 +23,7 @@ def _turns(*scripted):
     seen = []
     plan = list(scripted)
 
-    def fake(text, session_id=None, run=None):
+    def fake(text, session_id=None, run=None, speaker="user", carried_plan=""):
         seen.append(text)
         result = plan.pop(0) if plan else {}
         return dict({"reply": "", "warnings": [], "trace": {},
@@ -129,18 +129,17 @@ def test_progress_resets_the_stall_count(temp_db):
     assert out["stopped_because"] == "finished"
 
 
-def test_the_user_can_redirect_a_running_loop(temp_db):
-    """The reason this is not a batch job. A message arriving mid-run becomes
-    the NEXT instruction outright rather than being appended to the plan it
-    interrupts — a user who speaks up is redirecting, and letting the
-    abandoned plan still set the agenda is how "stop doing that" turns into
-    "do that, and also this"."""
+def test_the_user_reaches_a_running_loop_without_halting_it(temp_db):
+    """The reason this is not a batch job. What the user says becomes the next
+    instruction, so it is answered rather than merely logged — and the run
+    keeps going, which is the whole difference from stopping it and starting
+    again."""
     run = turnrun.create("start", None)
-    fake = _turns(_worked("keep refactoring"), _worked("keep refactoring"),
-                  {"continue_work": "", "reply": "stopped"})
-    original = fake
+    original = _turns(_worked("keep refactoring"), _worked("keep refactoring"),
+                      {"continue_work": "", "reply": "stopped"})
 
-    def with_interjection(text, session_id=None, run=None):
+    def with_interjection(text, session_id=None, run=None, speaker="user",
+                          carried_plan=""):
         result = original(text, session_id, run=run)
         if len(original.seen) == 1:
             run.say("actually, leave that file alone")
@@ -150,8 +149,50 @@ def test_the_user_can_redirect_a_running_loop(temp_db):
                                run_turn=with_interjection)
 
     assert original.seen[1] == "actually, leave that file alone"
-    assert "keep refactoring" not in original.seen[1]
     assert [r["from_user"] for r in out["replies"]][:2] == [True, True]
+    assert out["iterations"] > 2, "speaking to it should not end the run"
+
+
+def test_an_interjection_carries_the_plan_rather_than_replacing_it(temp_db):
+    """The fix to the test above's first draft. Replacing the plan meant a
+    user who added a detail mid-run destroyed three iterations of work — so
+    the sensible thing for them to do was stay silent, which defeats the
+    entire point of a steerable run. The plan travels as `carried_plan`; the
+    model decides whether the interjection cancels it."""
+    run = turnrun.create("start", None)
+    calls = []
+
+    def fake(text, session_id=None, run=None, speaker="user", carried_plan=""):
+        calls.append({"text": text, "speaker": speaker,
+                      "carried": carried_plan})
+        if len(calls) == 1:
+            run.say("also, check the tests")
+            return {"reply": "", "continue_work": "finish rewriting judge()",
+                    "trace": {"edits": [{"path": "coding.py"}]},
+                    "respond_ok": True}
+        return {"reply": "done", "continue_work": "", "trace": {},
+                "respond_ok": True}
+
+    autoloop.run_session("fix the harness", run=run, run_turn=fake)
+
+    assert calls[1]["text"] == "also, check the tests"
+    assert calls[1]["speaker"] == "user"
+    assert calls[1]["carried"] == "finish rewriting judge()"
+
+
+def test_a_self_driven_iteration_says_so(temp_db):
+    """`speaker` is what stops the assistant's own next step being minted as
+    a witnessed memory of something the user said."""
+    calls = []
+
+    def fake(text, session_id=None, run=None, speaker="user", carried_plan=""):
+        calls.append(speaker)
+        return {"reply": "", "respond_ok": True, "trace": {"edits": [1]},
+                "continue_work": "" if len(calls) > 1 else "keep going"}
+
+    autoloop.run_session("start", run_turn=fake)
+
+    assert calls == ["user", "self"]
 
 
 def test_a_message_to_a_finished_run_is_refused_rather_than_dropped(temp_db):
