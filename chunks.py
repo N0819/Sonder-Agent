@@ -56,11 +56,34 @@ MIN_CHUNK_CHARS = 40
 # about a model's context. Nothing here reaches a payload; the digest's own
 # budget does that. This exists so a workspace containing a 900 MB dependency
 # tree cannot turn one upload into a ten-minute read.
-INGEST_CHAR_BUDGET = 8_000_000
+#
+# Raised from 8M. The workspace now holds a 453-file project alongside the
+# assistant's own tree: 8.57M characters of source in the engine plus ~1M of
+# its own, so the old ceiling would have indexed the newest files and silently
+# dropped the assistant's own codebase out of its own index — the drop is
+# recorded, but recording it does not make an assistant that cannot find its
+# own modules any less blind. Chunk rows are cheap; `DIGEST_CHAR_BUDGET` is
+# what bounds the payload, and it is unchanged at 12k.
+INGEST_CHAR_BUDGET = 24_000_000
 # Where the last pass says what it did and what it left out. The record has to
 # live somewhere `digest` can read without walking the filesystem, because
 # `digest` runs on every turn and the walk does not.
 INGEST_STATE_KEY = "chunk_index"
+
+# The largest single file worth chunking. Above this it is data, not source.
+#
+# A workspace held two demo story blobs — 18.2 MB and 11.7 MB of JSON — which
+# `language_of` recognises as a language and which therefore consumed 30 MB of
+# a 24 MB budget between them. They chunk into thousands of entries no one can
+# navigate by gist, and they pushed 27 real source files out of the index
+# entirely: the assistant asked for the engine's `memory.py` and was told no
+# indexed file matched, because two fixtures had spent the budget first.
+#
+# Set above the largest genuine source in either project (`commit.py` at 292 KB,
+# `CHANGELOG.md` at 354 KB) so nothing hand-written is ever caught by it. A file
+# over this is named and its size given, never dropped in silence — the same
+# rule the rest of this module follows.
+MAX_SOURCE_CHARS = 500_000
 
 
 # The chunk map shares the WORKSPACE's lifetime, not a session's.
@@ -236,6 +259,7 @@ def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
     root = workspace.session_root(session_id)
     total, indexed, spent = 0, 0, 0
     skipped = []
+    live = set()
     for entry in workspace.list_files(session_id):
         path = entry["path"]
         language = codemap.language_of(os.path.basename(path))
@@ -253,6 +277,28 @@ def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
         if spent >= budget:
             skipped.append({"path": path, "why": "index budget spent"})
             continue
+        # AN ARCHIVE IS NOT A LIVE CODEBASE, AND ITS PROSE IS THE USEFUL HALF.
+        # `demo/` and `demos/` hold recorded stories and captured runs — 18.2 MB
+        # and 11.7 MB of JSON in the project that prompted this — which chunk
+        # into thousands of entries nobody can navigate by gist and which spent
+        # the budget twenty-seven real modules needed. Their notes and write-ups
+        # are worth having; their transcripts are not.
+        #
+        # Indexed, not hidden: the files stay in `list_files` and stay readable,
+        # so an assistant that decides it needs the transcript can open it
+        # deliberately. What it cannot do is have it arrive by default.
+        if workspace.in_archive_dir(path) and language != "markdown":
+            skipped.append({"path": path,
+                            "why": "recorded run — only prose is indexed from "
+                                   "an archive folder; read it directly to go "
+                                   "deeper"})
+            continue
+        if entry.get("bytes", 0) > MAX_SOURCE_CHARS:
+            skipped.append({
+                "path": path,
+                "why": f"{entry['bytes']:,} bytes — data, not source; over the "
+                       f"{MAX_SOURCE_CHARS:,} ceiling"})
+            continue
         try:
             with open(os.path.join(root, path), "r", encoding="utf-8") as fh:
                 source = fh.read()
@@ -264,9 +310,23 @@ def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
             continue
         spent += len(source)
         indexed += 1
+        live.add(path)
         total += len(put(session_id, "code", path, split_code(source, language)))
+    # ORPHANS OUTLIVE THE RULE THAT EXCLUDED THEM. `put` replaces per source,
+    # so a file that STOPS being indexed is never revisited and its chunks sit
+    # in the table forever — still returned by `outline` and `expand`, still
+    # describing material the index no longer claims to cover. Excluding a
+    # directory without this leaves exactly the stale-map failure `reingest_path`
+    # exists to prevent, arriving from the other side.
+    stale = [r["source_ref"] for r in q(
+        "SELECT DISTINCT source_ref FROM chunks WHERE session_id=?",
+        (_scope(session_id),)) if r["source_ref"] not in live]
+    for ref in stale:
+        qi("DELETE FROM chunks WHERE session_id=? AND source_ref=?",
+           (_scope(session_id), ref))
     state_put(INGEST_STATE_KEY, {
         "indexed_sources": indexed, "chunks": total,
+        "pruned_sources": len(stale),
         "read_chars": spent, "budget_chars": budget,
         "skipped_count": len(skipped), "skipped": skipped[:40]})
     return total
@@ -446,6 +506,40 @@ def _relevance(query, row):
     return (len(terms & gist) + 2 * len(terms & path)) / (len(terms) + 2.0)
 
 
+def _unwalked_sources(session_id, limit=8):
+    """Source files present in the workspace that the index has never seen.
+
+    Distinct from `skipped`, which is what an ingest walked and declined. This
+    is what no ingest ever looked at — the failure that has no record anywhere,
+    because the code that would have written the record did not run."""
+    import os
+    import workspace
+    try:
+        present = {e["path"] for e in workspace.list_files(session_id)
+                   if codemap.language_of(os.path.basename(e["path"]))}
+    except Exception:
+        return []
+    if not present:
+        return []
+    known = {r["source_ref"] for r in q(
+        "SELECT DISTINCT source_ref FROM chunks WHERE session_id=?",
+        (_scope(session_id),))}
+    missing = sorted(present - known)
+    if not missing:
+        return []
+    # NAMED, BUT NOT AT ANY PRICE. The rest of this module names what it drops
+    # rather than counting it, and that is right — but this list is computed
+    # from the filesystem and can be arbitrarily long, and it lands inside a
+    # payload with a 12k budget. Naming forty files pushed a digest to 8.6k on
+    # its own. So: name a few, and say how many there are.
+    out = [{"path": p, "why": "never indexed — no ingest has walked it"}
+           for p in missing[:limit]]
+    if len(missing) > limit:
+        out.append({"path": f"…and {len(missing) - limit} more",
+                    "why": "never indexed — run an ingest to map them"})
+    return out
+
+
 def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR_BUDGET,
            summary="", query=""):
     """The navigable view: a pinned summary, a gist per chunk, and only the
@@ -487,15 +581,33 @@ def digest(session_id=WORKSPACE, *, kind=None, expand_ids=(), budget=DIGEST_CHAR
     sources = sorted({r["source_ref"] for r in rows})
     index = state_get(INGEST_STATE_KEY) or {}
     dropped = index.get("skipped") or []
+    # THE RECORD KNOWS ONLY WHAT THE LAST INGEST WALKED, WHICH IS NOT THE SAME
+    # AS WHAT IS THERE. `ingest_workspace` runs from the upload and extract
+    # routes — "map on the way in" — so a tree that arrives by any other door
+    # is never walked, never indexed, and never skipped either: it is absent
+    # from the record entirely, and the record still announces "N chunks across
+    # M sources" in the same confident tone.
+    #
+    # That happened. A 453-file project was unpacked into the workspace by hand
+    # and stayed invisible; `outline` answered "no indexed file matches" and an
+    # assistant reading it would conclude the code was not there. This is the
+    # module's own opening scar — a corpus quietly missing part of itself
+    # produces confident answers about code nobody looked at — arriving through
+    # a door the fix did not cover.
+    #
+    # So the drift is measured against the FILESYSTEM, not against memory. The
+    # walk was assumed too expensive to run per turn; measured, it is 20ms for
+    # 590 files, against a turn that costs a minute of model time.
+    dropped = list(dropped) + _unwalked_sources(session_id)
     return {
         # Pinned: what the whole thing IS, before any of the parts.
         "summary": summary or (
             f"{len(rows)} chunks across {len(sources)} sources"
             + (": " + ", ".join(sources[:8]) if sources else "")
             + ("…" if len(sources) > 8 else "")
-            + (f" — {index.get('skipped_count')} file(s) in the workspace are "
-               "NOT in this index, listed under `not_indexed`"
-               if index.get("skipped_count") else "")),
+            + (f" — at least {len(dropped)} file(s) in the workspace are NOT "
+               "in this index, listed under `not_indexed`"
+               if dropped else "")),
         "total_chunks": len(rows),
         "showing": shown,
         # HOW the shown entries were chosen, not just how many. A ranked list

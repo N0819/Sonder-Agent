@@ -515,3 +515,65 @@ def test_the_turn_can_outline_then_expand_then_edit(temp_db, tmp_path):
     after = workspace.read_file("target.py")["text"]
     assert 'return "refuted"' not in after, after
     assert after.count('return "inconclusive"') == 2
+
+
+def test_an_archive_folder_contributes_prose_and_not_transcripts(temp_db,
+                                                                 tmp_path):
+    """A RECORDED RUN IS NOT A LIVE CODEBASE. `demos/` held 18.2 MB and 11.7 MB
+    of story JSON, which `language_of` recognises and which therefore consumed
+    30 MB of a 24 MB budget between them — pushing 27 real modules out of the
+    index entirely. The assistant asked for the engine's `memory.py` and was
+    told no indexed file matched, because two fixtures had spent the budget."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    import os
+    root = workspace.session_root(1)
+    os.makedirs(os.path.join(root, "demos"), exist_ok=True)
+    with open(os.path.join(root, "demos", "story.json"), "w") as fh:
+        fh.write('{"beats": [1, 2, 3]}\n')
+    with open(os.path.join(root, "demos", "findings.md"), "w") as fh:
+        fh.write("# What we learned\n\nA lot.\n")
+    workspace.store_upload(1, "engine.py", b"def live():\n    return 1\n")
+    chunks.ingest_workspace()
+
+    sources = {e["source"] for e in chunks.digest(kind="code")["entries"]}
+    assert any("engine.py" in s for s in sources)
+    assert any("findings.md" in s for s in sources), "archive prose is useful"
+    assert not any("story.json" in s for s in sources), "the transcript is not"
+
+
+def test_a_file_that_stops_being_indexed_loses_its_chunks(temp_db, tmp_path):
+    """ORPHANS OUTLIVE THE RULE THAT EXCLUDED THEM. `put` replaces per source,
+    so a file that STOPS being indexed was never revisited and its chunks sat
+    in the table forever — still returned by `outline` and `expand`, still
+    describing material the index no longer claims to cover."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "keep.py", b"def keep():\n    return 1\n")
+    workspace.store_upload(1, "gone.py", b"def gone():\n    return 2\n")
+    chunks.ingest_workspace()
+    assert any("gone.py" in e["source"]
+               for e in chunks.digest(kind="code")["entries"])
+
+    import os
+    os.remove(os.path.join(workspace.session_root(1), "gone.py"))
+    chunks.ingest_workspace()
+
+    sources = {e["source"] for e in chunks.digest(kind="code")["entries"]}
+    assert not any("gone.py" in s for s in sources)
+    assert any("keep.py" in s for s in sources)
+
+
+def test_reading_raw_story_data_is_refused_with_the_reason(temp_db, tmp_path):
+    """"WORK ON IT IN CHUNKS" IS THE WRONG ADVICE FOR RAW DATA, and it is the
+    expensive one: paging a recorded story costs a fortune in context and
+    answers nothing, because the thing wanted is one record in the middle
+    rather than something a reader accumulates."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "story.json", b"x" * 400_000)
+
+    got = workspace.read_file("story.json", 1)
+    assert got["ok"] is False
+    assert "raw data" in got["error"]
+    assert "Search it" in got["error"], "it must name the cheap approach"

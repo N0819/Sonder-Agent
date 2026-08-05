@@ -263,9 +263,30 @@ def read_file(relative, session_id=None, limit=MAX_READ_BYTES):
     except (OSError, UnicodeDecodeError) as exc:
         return {"ok": False, "error": f"could not read {relative!r}: {exc}"}
     if len(text) > limit:
+        size = os.path.getsize(target)
+        # "WORK ON IT IN CHUNKS" IS THE WRONG ADVICE FOR RAW DATA, and it is
+        # the expensive one. A recorded story is tens of megabytes of JSON: read
+        # sequentially it costs a fortune in context and returns almost nothing
+        # per page, because the answer is one record somewhere in the middle
+        # rather than something a reader accumulates. Chunking through it is
+        # not a smaller version of reading it, it is the same cost paid slowly.
+        #
+        # So the refusal names the size and the shape and points at the only
+        # approach that is cheap: search for the record, then read around it.
+        data_like = str(relative).lower().rsplit(".", 1)[-1] in (
+            "json", "jsonl", "ndjson", "csv", "log")
+        if data_like and size > 200_000:
+            return {"ok": False,
+                    "error": f"{relative!r} is {size:,} bytes of raw data, not "
+                             "source. Reading it in pages is expensive and "
+                             "usually answers nothing — one record in the "
+                             "middle is the thing you want. Search it for the "
+                             "key or id you are after and read around the hit "
+                             "instead of walking it."}
         return {"ok": False,
-                "error": f"{relative!r} is larger than the {limit} character "
-                         "read limit; work on it in chunks"}
+                "error": f"{relative!r} is {size:,} bytes, larger than the "
+                         f"{limit:,} character read limit; work on it in "
+                         "chunks"}
     return {"ok": True, "text": text, "bytes": len(text.encode())}
 
 
@@ -380,10 +401,32 @@ def diff_text(before, after, path="", context=3):
 # `codemap` has had its own `_SKIP_DIRS` since before this module existed;
 # the mistake was that `list_files` never consulted one. Same set, one
 # meaning — the module that already knew is the one to ask.
+# Machinery, and then FIXTURES. The two are skipped for the same reason from
+# the index's point of view: neither is the code the assistant is being asked
+# about. A project's `demo/` and `demos/` hold recorded stories and captured
+# runs — 18.2 MB and 11.7 MB of JSON in the one that prompted this — and
+# chunking them buys thousands of entries nobody can navigate by gist while
+# spending the budget that real source needed. Twenty-seven modules went
+# unindexed behind two fixtures, and `outline` answered "no indexed file
+# matches" for a file that was plainly on disk.
+#
+# An archive is not a live codebase. Pruned at the WALK so nothing downstream
+# has to remember, which is the same reason the machinery names are here.
 _SKIP_WALK_DIRS = frozenset(codemap._SKIP_DIRS) | {
     ".git", ".hg", ".svn", ".pytest_cache", "__pycache__", ".mypy_cache",
     ".ruff_cache", ".tox", "node_modules", ".venv", "venv",
 }
+
+# Recorded runs and captured stories. NOT pruned from the walk — the assistant
+# must still be able to list them and read one on purpose — but the indexer
+# takes only their prose. See `chunks.ingest_workspace`.
+ARCHIVE_DIRS = frozenset({"demo", "demos", "fixtures", "snapshots", "backups"})
+
+
+def in_archive_dir(relative):
+    """True when a workspace-relative path sits under a recorded-run folder."""
+    parts = str(relative or "").replace("\\", "/").split("/")
+    return any(p in ARCHIVE_DIRS for p in parts[:-1])
 
 
 def list_files(session_id=None):
