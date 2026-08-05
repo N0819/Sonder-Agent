@@ -28,6 +28,7 @@
 
 import json
 import sys
+import time
 
 _stdout = sys.stdout
 
@@ -167,17 +168,65 @@ def main():
         "you and it must stand on its own.")
     persona.save_persona(sheet)
 
+    # WHAT IS LEFT, IN SECONDS, KEPT BY THE THING THAT HAS TO SPEND IT.
+    #
+    # The working loop used to run until the parent killed it. The report is
+    # a separate final call and the only thing that survives this process, so
+    # a run that spent its whole budget working returned nothing whatever —
+    # fourteen minutes, seven hypotheses and four completed experiments in one
+    # observed case, all discarded because the last call never happened.
+    #
+    # Measured against the START of a turn, never mid-turn: a turn cannot be
+    # interrupted usefully, and stopping one half-way loses it anyway. So the
+    # question asked here is "is there time for another one", and the answer
+    # accounts for how long the turns already taken actually took rather than
+    # assuming.
+    budget = float(task_payload.get("budget_seconds") or 0)
+    reserve = float(task_payload.get("report_reserve_seconds") or 0)
+    started = time.monotonic()
+    stopped_early = ""
+
+    def _time_left():
+        return budget - (time.monotonic() - started) if budget else None
+
     transcript = []
     briefing = _briefing(task, context, given_map)
     turn_text = briefing
+    longest_turn = 0.0
     for turn in range(max_turns):
+        left = _time_left()
+        if turn and time_to_stop(left, reserve, longest_turn):
+            stopped_early = (
+                f"Stopped after {turn} turn(s) with {left:.0f}s left of a "
+                f"{budget:.0f}s budget: not enough time for another turn "
+                "and the report. What follows is what was established, "
+                "not everything that was asked.")
+            transcript.append(f"[{stopped_early}]")
+            break
+        turn_started = time.monotonic()
         try:
             result = pipeline.run_turn(turn_text)
         except Exception as exc:                       # pragma: no cover
             transcript.append(f"[turn {turn + 1} failed: {str(exc)[:200]}]")
             break
+        longest_turn = max(longest_turn, time.monotonic() - turn_started)
         reply = result.get("reply") or ""
         transcript.append(reply)
+        # A HEARTBEAT THE PARENT CAN TIME AGAINST, and the only per-turn view
+        # of a subagent anyone has ever had. Until now the child spoke only to
+        # ask a question or to report, so a child working steadily and a child
+        # wedged were the same silence — and the parent's only recourse was a
+        # wall clock that killed the productive one just as readily.
+        #
+        # It carries what the turn actually did, not that it happened: the
+        # counts are what say whether the silence was work.
+        trace = result.get("trace") or {}
+        _send({"type": "progress", "turn": turn + 1,
+               "seconds": round(time.monotonic() - turn_started, 1),
+               "experiments": len(trace.get("experiments") or []),
+               "edits": len(trace.get("edits") or []),
+               "minted": trace.get("minted") or 0,
+               "said": " ".join(reply.split())[:300]})
         upper = reply.upper()
         if "REPORT READY" in upper:
             break
@@ -234,6 +283,11 @@ def main():
     # judging model output outside the thing being judged.
     payload = {
         "task": task,
+        # Named in the payload, not just in the transcript: a report written
+        # under a deadline that does not say so reads as a finished
+        # investigation, and the difference is the whole value of the field
+        # the child is asked to fill in with what it could not establish.
+        **({"stopped_early": stopped_early} if stopped_early else {}),
         "what_i_did_and_found": transcript,
         "experiments": _experiments(),
         "evidence_available": _all_evidence(),
@@ -254,6 +308,22 @@ def main():
     report.setdefault("evidence", payload["evidence_available"])
     _send({"type": "report", "report": report})
     return 0
+
+
+def time_to_stop(seconds_left, reserve, longest_turn):
+    """Is there room for another working turn AND the report?
+
+    Measured at the START of a turn, never mid-turn: a turn cannot be
+    interrupted usefully and stopping one half-way loses it anyway. So the
+    question is "is there time for another one", answered against how long the
+    turns already taken actually took rather than against an assumption.
+
+    `None` means no budget was given — an unbounded child, which is what every
+    child was before this, and which is why one returned nothing after
+    fourteen minutes of successful work."""
+    if seconds_left is None:
+        return False
+    return seconds_left < reserve + max(longest_turn, 30.0)
 
 
 def _briefing(task, context, given_map):

@@ -79,7 +79,28 @@ _REQUESTS = "subagent_requests"
 # unbounded one would be a way to spend the parent's budget without the
 # parent's knowledge. Same reasoning as RESEARCH_MAX_ROUNDS.
 DEEP_MAX_TURNS = 6
-DEEP_TIMEOUT = 900.0
+# TWO BOUNDS, NOT ONE — the split `providers.py` already made for the CLI and
+# nobody carried up to here. Its comment is exactly this defect one layer
+# down: "180 seconds killed real answers mid-sentence and reported it as a
+# provider fault."
+#
+# A single wall clock cannot tell a wedged child from a productive one, so it
+# killed both at the same moment. Observed: fourteen minutes of work, seven
+# hypotheses, four completed experiments, destroyed for being slow rather than
+# for being stuck. A deep read of a large codebase is legitimately long.
+#
+# `DEEP_IDLE_TIMEOUT` is the real guard: the child now reports every completed
+# turn, so silence is measurable and silence is the only thing that means
+# stuck. `DEEP_TIMEOUT` survives as a livelock ceiling — a child that emits
+# forever without concluding — and is set where cost, not patience, argues
+# for it.
+DEEP_TIMEOUT = 3600.0
+DEEP_IDLE_TIMEOUT = 900.0
+# Held back from the working budget so the report can be written. The report
+# is a separate model call and the ONLY artefact that outlives the child, so
+# spending the last second of the budget on one more experiment is spending
+# the whole run: everything learned goes down with the process.
+REPORT_RESERVE = 240.0
 SCOUT_MAX_ROUNDS = 4
 
 # A ceiling on what the USER can grant in one go, so an accidental extra zero
@@ -1085,6 +1106,19 @@ def _run_deep(task, *, session_id=None, context="", turn_idx=0,
         "task": task,
         "context": context[:8000],
         "max_turns": DEEP_MAX_TURNS,
+        # A DEADLINE IT CANNOT SEE IS ONE IT CANNOT PLAN AGAINST, and this one
+        # was invisible: the child worked until the parent killed it, and the
+        # report — a SEPARATE final call, the only thing that survives it —
+        # never ran. A run that had done its work and formed its conclusions
+        # returned nothing at all. Observed: fourteen minutes, seven
+        # hypotheses, four completed experiments, discarded whole.
+        #
+        # The same rule the deliberation loop already follows for rounds, in
+        # seconds: say how much is left so the worker can stop in time to
+        # deliver. Sent as a duration rather than a wall-clock instant because
+        # the child is a separate process and clocks are the parent's to keep.
+        "budget_seconds": DEEP_TIMEOUT,
+        "report_reserve_seconds": REPORT_RESERVE,
         # The map, and the project's own instructions if it carries any.
         # Handed over at the start so the child never has to spend a turn
         # discovering the shape of what it was given.
@@ -1222,14 +1256,27 @@ def _converse(proc, task_payload, *, session_id, turn_idx, assignment=None,
         # remaining timeout, which from the button's side is a halt that did
         # nothing for two minutes.
         run.register_process(proc)
-    deadline = time.monotonic() + DEEP_TIMEOUT
+    # The parent's own deadline sits PAST the child's, by the reserve it told
+    # the child to hold back. Two bounds, not one: the child stops working in
+    # time to report, and the parent waits long enough to receive it. Without
+    # the second half the first buys nothing — the report would be composed
+    # and then killed on the way out.
+    deadline = time.monotonic() + DEEP_TIMEOUT + REPORT_RESERVE
+    last_word = time.monotonic()
     proc.stdin.write(json.dumps(task_payload) + "\n")
     proc.stdin.flush()
     answered = 0
     while True:
-        if time.monotonic() > deadline:
+        now = time.monotonic()
+        if now - last_word > DEEP_IDLE_TIMEOUT:
             raise RuntimeError(
-                f"the deep subagent did not finish within {DEEP_TIMEOUT:.0f}s")
+                f"the deep subagent said nothing for {DEEP_IDLE_TIMEOUT:.0f}s "
+                "— it reports every completed turn, so this is a stuck child "
+                "rather than a slow one")
+        if now > deadline:
+            raise RuntimeError(
+                "the deep subagent was still going after "
+                f"{DEEP_TIMEOUT + REPORT_RESERVE:.0f}s without concluding")
         line = proc.stdout.readline()
         if not line:
             stderr = (proc.stderr.read() or "").strip()[-400:]
@@ -1244,7 +1291,23 @@ def _converse(proc, task_payload, *, session_id, turn_idx, assignment=None,
             continue          # the child printed something that was not
             # protocol; ignore rather than die, since a stray print is not a
             # failure of the investigation
+        # ANY word from the child is proof it is alive; the idle clock is
+        # about silence, not about which message broke it.
+        last_word = time.monotonic()
         kind = str(message.get("type") or "")
+        if kind == "progress":
+            # Straight to the panel. A subagent was a hole in the trail —
+            # the turn went quiet for the whole of its run with no way to tell
+            # work from a hang — and this is the signal that closes it.
+            if run is not None:
+                run.emit("subagent", state="working", kind="deep", task=label,
+                         turn=message.get("turn"),
+                         seconds=message.get("seconds"),
+                         experiments=message.get("experiments"),
+                         edits=message.get("edits"),
+                         minted=message.get("minted"),
+                         said=message.get("said"))
+            continue
         if kind == "report":
             report = message.get("report") or {}
             if run is not None:

@@ -550,3 +550,46 @@ def test_a_deep_child_can_find_the_files_it_was_seeded(temp_db, tmp_path,
     child_root = workspace.root_under(seen["env"]["ASSISTANT_WORKSPACE"])
     assert seen["seeded"] == child_root, (
         f"seeded {seen['seeded']} but the child reads {child_root}")
+
+
+def test_a_productive_child_is_not_killed_for_being_slow(temp_db):
+    """A SINGLE WALL CLOCK CANNOT TELL A WEDGED CHILD FROM A PRODUCTIVE ONE,
+    so it killed both at the same moment: fourteen minutes of work, seven
+    hypotheses and four completed experiments destroyed for being slow rather
+    than for being stuck. `providers.py` had already made this exact split for
+    the CLI — "180 seconds killed real answers mid-sentence and reported it as
+    a provider fault" — and nobody carried it up to here."""
+    assert subagents.DEEP_IDLE_TIMEOUT < subagents.DEEP_TIMEOUT
+    # The ceiling has to leave room for real work; the idle guard is the one
+    # that fires in practice, and only on silence.
+    assert subagents.DEEP_TIMEOUT >= 3600
+    assert subagents.REPORT_RESERVE < subagents.DEEP_TIMEOUT
+
+
+def test_the_child_stops_in_time_to_report(temp_db):
+    """The report is a SEPARATE final call and the only artefact that outlives
+    the child, so a run that spends its whole budget working returns nothing
+    at all. Measured at the start of a turn against how long the turns already
+    taken actually took — a turn cannot be interrupted usefully, and stopping
+    one half-way loses it anyway."""
+    import subagent_runner as runner
+
+    assert runner.time_to_stop(None, 240, 60) is False, "no budget, no stop"
+    assert runner.time_to_stop(600, 240, 60) is False, "room for both"
+    assert runner.time_to_stop(241, 240, 60) is True, "only the reserve left"
+    # A child whose turns run long must stop EARLIER, not at the same mark.
+    assert runner.time_to_stop(350, 240, 200) is True
+    assert runner.time_to_stop(350, 240, 20) is False
+
+
+def test_the_child_reports_every_turn_so_silence_means_stuck(temp_db):
+    """Until now the child spoke only to ask a question or to report, so a
+    child working steadily and a child wedged were the same silence — and the
+    parent's only recourse was a wall clock that killed the productive one
+    just as readily."""
+    import inspect
+
+    import subagent_runner as runner
+    src = inspect.getsource(runner)
+    assert '"type": "progress"' in src, "the heartbeat is what makes idle mean stuck"
+    assert '"experiments"' in src, "it must carry what the turn did, not that it happened"

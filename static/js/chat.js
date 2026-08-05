@@ -124,6 +124,18 @@ function reasoningLine(ev) {
   if (ev.stage === 'subagent') {
     // A subagent used to be a hole in this panel: the turn went quiet for up
     // to DEEP_TIMEOUT with no way to tell work from a hang.
+    // A working heartbeat reads as progress, not as another status line.
+    if (ev.state === 'working') {
+      let t = (ev.kind || 'subagent') + ' — turn ' + ev.turn
+        + (ev.seconds ? ' (' + ev.seconds + 's)' : '');
+      const did = [];
+      if (ev.experiments) did.push(ev.experiments + ' experiment(s)');
+      if (ev.edits) did.push(ev.edits + ' edit(s)');
+      if (ev.minted) did.push(ev.minted + ' remembered');
+      if (did.length) t += ' — ' + did.join(', ');
+      if (ev.said) t += '\n   ' + ev.said;
+      return t;
+    }
     let text = (ev.kind || 'subagent') + ' — ' + ev.state;
     if (ev.task) text += '\n   task: ' + ev.task;
     if (ev.detail) text += '\n   ' + ev.detail;
