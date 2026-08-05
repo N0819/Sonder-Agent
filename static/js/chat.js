@@ -9,6 +9,10 @@ let sessionId = null;
 // variable global: one owner, one writer.
 function currentSessionId() { return sessionId; }
 let sending = false;
+// The run currently in flight, or null. Held so the composer can hand it a
+// message instead of starting a second turn: during an automation run the
+// send box is a way of TALKING TO the work, not of queueing behind it.
+let liveRun = null;
 
 // The small subset of Markdown a reply actually uses, rendered.
 //
@@ -143,6 +147,22 @@ function reasoningLine(ev) {
       + '\n   ' + ev.chunks + ' chunks located';
   }
   if (ev.stage === 'stream') return null;   // rendered live, not as a step
+  if (ev.stage === 'iteration') {
+    return 'iteration ' + ev.n + ' — '
+      + (ev.source === 'user' ? 'you asked' : 'it decided to carry on')
+      + '\n   ' + ev.instruction;
+  }
+  if (ev.stage === 'heard') {
+    return 'you said, mid-turn:\n   ' + ev.text;
+  }
+  if (ev.stage === 'stall') {
+    return 'no progress and the same next step (' + ev.count + ' of '
+      + ev.limit + ')\n   ' + ev.step;
+  }
+  if (ev.stage === 'loop') {
+    return 'stopped after ' + ev.iterations + ' iteration'
+      + (ev.iterations === 1 ? '' : 's') + ' — ' + ev.why;
+  }
   if (ev.stage === 'edit') {
     return 'edited ' + ev.path + (ev.created ? ' (new file)' : '')
       + '\n   re-chunked into ' + ev.rechunked + ' pieces';
@@ -198,14 +218,148 @@ function makeReasoningPanel() {
   return { wrap: wrap, body: body, toggle: toggle };
 }
 
-async function sendMessage(text, isRetry) {
+// The respond stage returns a JSON object, so what streams back is JSON —
+// and rendered as raw text it is a wall of braces and escaped newlines with
+// the actual answer buried inside it. The live view was the feature and it
+// was unreadable, which is the same as not having it.
+//
+// Nothing here waits for the object to close. A parser that needs valid JSON
+// shows nothing at all until the model is finished, which is exactly the
+// spinner the streaming work removed. So: parse when it parses, and until
+// then scan out the one field worth reading as it is written.
+const CHANNELS = {
+  reply: 'answering',
+  continue_work: 'planning its next step',
+  need_more: 'going back for more',
+  experiment: 'running code',
+  edit_files: 'editing files',
+  propose_fix: 'proposing a fix',
+  research: 'researching',
+  remember: 'keeping something',
+  memory_evidence_used: 'citing memory',
+  user_model_updates: 'revising what it thinks of you',
+  resolved_threads: 'closing a thread',
+  ponder: 'queuing a question for itself',
+  dispute: 'disputing a memory',
+  retire: 'retiring memories',
+  spawn: 'spawning subagents',
+  request_subagents: 'asking for subagents',
+};
+
+// Read one JSON string literal starting at the opening quote. Returns what it
+// has even when the closing quote has not arrived yet — an unterminated
+// string is the NORMAL case here, not an error, because the answer is being
+// typed. Escapes are decoded so a reply full of `\n` reads as lines.
+function scanJsonString(raw, from) {
+  let out = '';
+  let i = from + 1;
+  const simple = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f',
+                   '"': '"', '\\': '\\', '/': '/' };
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c === '\\') {
+      const n = raw[i + 1];
+      if (n === undefined) return { text: out, done: false };
+      if (n === 'u') {
+        if (i + 6 > raw.length) return { text: out, done: false };
+        out += String.fromCharCode(parseInt(raw.slice(i + 2, i + 6), 16));
+        i += 6;
+        continue;
+      }
+      out += (simple[n] !== undefined ? simple[n] : n);
+      i += 2;
+      continue;
+    }
+    if (c === '"') return { text: out, done: true };
+    out += c;
+    i += 1;
+  }
+  return { text: out, done: false };
+}
+
+// What the partial payload is saying so far: the reply as prose, and which
+// other side-channels it has begun to write.
+//
+// Channel names are matched against a KNOWN LIST rather than by collecting
+// every key seen. A generic scan picks up nested keys — `path`, `why`,
+// `old`, `new` — and reports them as though the model had opened a
+// side-channel called `old`, which is worse than saying nothing.
+function readStreamingJson(raw) {
+  const out = { reply: '', channels: [], parsed: null };
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === 'object') {
+      out.parsed = obj;
+      out.reply = typeof obj.reply === 'string' ? obj.reply : '';
+      Object.keys(CHANNELS).forEach(function (key) {
+        const v = obj[key];
+        const empty = v === undefined || v === null || v === ''
+          || (Array.isArray(v) && !v.length);
+        if (key !== 'reply' && !empty) out.channels.push(key);
+      });
+      return out;
+    }
+  } catch (e) { /* still being written — the expected case */ }
+  const at = raw.indexOf('"reply"');
+  if (at !== -1) {
+    const colon = raw.indexOf(':', at + 7);
+    const quote = colon === -1 ? -1 : raw.indexOf('"', colon + 1);
+    if (quote !== -1) out.reply = scanJsonString(raw, quote).text;
+  }
+  Object.keys(CHANNELS).forEach(function (key) {
+    if (key !== 'reply' && raw.indexOf('"' + key + '"') !== -1) {
+      out.channels.push(key);
+    }
+  });
+  return out;
+}
+
+// Draw the parsed view into the answer pane. Rebuilt from the whole buffer
+// each time rather than appended to, because a field can only be understood
+// once its value has arrived — and the buffer is a few kilobytes.
+function renderStreamingJson(pane, raw) {
+  const read = readStreamingJson(raw);
+  pane.textContent = '';
+  if (read.reply) {
+    const body = el('<div class="live-reply"></div>');
+    body.innerHTML = renderInlineMarkdown(read.reply);
+    pane.appendChild(body);
+  }
+  if (read.channels.length) {
+    const also = el('<div class="live-channels"></div>');
+    also.textContent = 'also: ' + read.channels.map(function (k) {
+      return CHANNELS[k];
+    }).join(' · ');
+    pane.appendChild(also);
+  }
+  // NOT HIDDEN, just folded. A prettier view that drops information is a
+  // worse view; the raw payload is what a defect gets reported against.
+  if (raw.trim() && (read.reply || read.channels.length)) {
+    const raws = el('<details class="live-raw"></details>');
+    const sum = el('<summary></summary>');
+    sum.textContent = 'raw JSON';
+    const pre = el('<pre></pre>');
+    pre.textContent = raw;
+    raws.appendChild(sum);
+    raws.appendChild(pre);
+    pane.appendChild(raws);
+  } else if (!read.reply && !read.channels.length) {
+    pane.textContent = raw;      // not JSON at all: show exactly what came
+  }
+}
+
+async function sendMessage(text, isRetry, alreadyShown) {
   if (sending || !text.trim()) return;
   sending = true;
   document.getElementById('send').disabled = true;
-  addMsg('user', isRetry ? text + '  (retry)' : text);
+  // `alreadyShown` is set by the late-message fallback, which has already
+  // echoed the user's words. Echoing them twice would read as the message
+  // having been sent twice, which is the one thing that path must not imply.
+  if (!alreadyShown) addMsg('user', isRetry ? text + '  (retry)' : text);
   let runId = null;
+  const auto = document.getElementById('auto').checked;
   try {
-    const started = await api('/api/chat/start', {
+    const started = await api(auto ? '/api/chat/auto' : '/api/chat/start', {
       method: 'POST',
       body: JSON.stringify({ text: text, session_id: sessionId }),
     });
@@ -222,9 +376,40 @@ async function sendMessage(text, isRetry) {
   await watchExisting(runId, text);
 }
 
+// Hand a message to the run that is already working.
+//
+// The failure this guards against is losing the words. A run can finish
+// between the keystroke and the request, so the server reports whether the
+// message was actually delivered — and when it was not, it becomes an
+// ordinary new turn rather than vanishing into a run that had already
+// stopped listening.
+async function sayToRun(text) {
+  if (!text.trim()) return;
+  const runId = liveRun;
+  addMsg('user', text);
+  try {
+    const out = await api('/api/chat/' + runId + '/say', {
+      method: 'POST',
+      body: JSON.stringify({ text: text, session_id: sessionId }),
+    });
+    if (out.outcome !== 'delivered') {
+      addMsg('meta', 'that turn had already finished — sending it as a '
+                     + 'new message instead…');
+      liveRun = null;
+      sending = false;           // the stream's `end` may not have landed yet
+      await sendMessage(text, false, true);
+    }
+  } catch (err) {
+    addMsg('meta', 'could not reach the run: ' + err.message, null, text);
+  }
+}
+
 function releaseComposer() {
   sending = false;
+  liveRun = null;
   document.getElementById('send').disabled = false;
+  document.getElementById('send').textContent = 'Send';
+  document.getElementById('running-hint').style.display = 'none';
   const haltBtn = document.getElementById('halt');
   haltBtn.style.display = 'none';
   haltBtn.disabled = false;
@@ -237,7 +422,19 @@ function releaseComposer() {
 // case nobody tests.
 async function watchExisting(runId, text) {
   sending = true;
-  document.getElementById('send').disabled = true;
+  liveRun = runId;
+  // THE SEND BOX STAYS OPEN. Disabling it was right when a turn was atomic —
+  // there was nowhere for the words to go. Now there is: the run drains what
+  // you type at its next round boundary, so a correction reaches the work
+  // before the work it would have changed is finished. Halting to say one
+  // sentence throws away everything the run has established.
+  const sendBtn = document.getElementById('send');
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send to run';
+  const hint = document.getElementById('running-hint');
+  hint.textContent = 'It is working. Anything you send now reaches it '
+                     + 'mid-turn, at its next round boundary.';
+  hint.style.display = '';
   const haltBtn = document.getElementById('halt');
 
   const pending = addMsg('meta', 'thinking\u2026');
@@ -248,6 +445,7 @@ async function watchExisting(runId, text) {
   live.style.display = 'none';
   live.think = el('<div class="live-stream thinking"></div>');
   live.answer = el('<div class="live-stream"></div>');
+  live.raw = '';                 // the answer payload as sent, before parsing
   live.think.style.display = 'none';
   live.answer.style.display = 'none';
   live.appendChild(live.think);
@@ -320,7 +518,16 @@ async function watchExisting(runId, text) {
         // pane read as a single confident statement.
         const target = ev.kind === 'thinking' ? live.think : live.answer;
         if (ev.truncated) { target.classList.add('capped'); return; }
-        target.textContent += ev.delta || '';
+        // Thinking is already prose. The answer is a JSON payload, so it is
+        // buffered and re-rendered rather than appended: the reply field has
+        // to be extracted from the buffer, and a pane built by `+=` cannot be
+        // re-read.
+        if (ev.kind === 'thinking') {
+          target.textContent += ev.delta || '';
+        } else {
+          live.raw += ev.delta || '';
+          renderStreamingJson(target, live.raw);
+        }
         target.style.display = 'block';
         live.style.display = 'block';
         target.scrollTop = target.scrollHeight;
@@ -425,6 +632,11 @@ function initChat() {
     ev.preventDefault();
     const text = input.value;
     input.value = '';
+    // One box, two destinations, decided by whether something is running.
+    // A separate "interject" field would be a control the user has to notice
+    // exists before they can use it, and the whole point is that talking to a
+    // working run should feel like talking.
+    if (liveRun) { sayToRun(text); return; }
     sendMessage(text);
   });
   input.addEventListener('keydown', function (ev) {

@@ -102,6 +102,24 @@ button.danger { background: #3b2530; color: #f7768e; }
   color: #77808c; font-size: .78rem; }
 .live-stream.thinking { color: #77808c; font-style: italic;
   border-left-color: #3a3f48; max-height: 10rem; }
+
+/* The answer, parsed out of the JSON payload as it is written. The raw object
+   is a wall of braces with the reply buried in it, which made the live view
+   technically present and practically unreadable. */
+.live-reply { color: #d6dce5; white-space: pre-wrap; }
+.live-channels { margin-top: .4rem; font-size: .78rem; color: #77808c; }
+.live-raw { margin-top: .45rem; }
+.live-raw summary { cursor: pointer; font-size: .75rem; color: #5f6874; }
+.live-raw summary:hover { color: #8b95a3; }
+.live-raw pre { margin: .3rem 0 0; font-size: .72rem; color: #6b7480;
+  white-space: pre-wrap; word-break: break-word; }
+
+/* Automation: the toggle that starts a run, and the line that says the send
+   box is now aimed at it rather than at a new turn. */
+#autowrap { display: inline-flex; align-items: center; gap: .3rem;
+  font-size: .78rem; color: #77808c; cursor: pointer; }
+#autowrap input { cursor: pointer; }
+#running-hint { margin-top: .35rem; font-size: .75rem; color: #6b7480; }
 .reasoning-step .step-head { cursor: default; }
 .reasoning-step .step-head.expandable { cursor: pointer; }
 .reasoning-step .step-head.expandable:hover { color: #b9c2cf; }

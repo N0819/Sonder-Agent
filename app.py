@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import autoloop
 import beliefs
 import chunks
 import config
@@ -63,6 +64,40 @@ def chat_start(body: ChatIn):
     turnrun.start(run, lambda r: pipeline.run_turn(text, body.session_id,
                                                   run=r))
     return {"turn_run_id": run.id}
+
+
+@app.post("/api/chat/auto")
+def chat_auto(body: ChatIn):
+    """Begin an automation run: turns chain until the assistant stops asking
+    for another, the user halts, or it stops making progress.
+
+    A separate route rather than a flag on `/api/chat/start`, because the two
+    differ in the only way a caller cares about — when they end — and a client
+    that got the mode wrong would either stop a long task after one turn or
+    leave an unattended loop running against a provider bill."""
+    text = (body.text or "").strip()
+    if not text:
+        return JSONResponse({"error": "empty message"}, status_code=400)
+    run = autoloop.start(text, body.session_id)
+    return {"turn_run_id": run.id, "auto": True}
+
+
+@app.post("/api/chat/{run_id}/say")
+def chat_say(run_id: str, body: ChatIn):
+    """Speak to a run that is already working.
+
+    The whole point of the automation loop: a correction arriving mid-run is
+    read at the next round boundary rather than queued behind work it would
+    have changed. Reports whether it was actually delivered — a message typed
+    into a run that has just finished has to become an ordinary new turn, and
+    a client told "delivered" would have dropped it."""
+    run = turnrun.get(run_id)
+    if run is None:
+        return JSONResponse({"error": "unknown turn"}, status_code=404)
+    outcome = run.say(body.text)
+    if outcome == "empty":
+        return JSONResponse({"error": "empty message"}, status_code=400)
+    return {"outcome": outcome, "status": run.status}
 
 
 def resume_cursor(header, param):

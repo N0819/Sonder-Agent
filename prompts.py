@@ -78,6 +78,13 @@ buys, because a single source cannot settle a question and a single
 counter-example can unsettle one. Two hypotheses at the same number are two
 questions that received the same evidence, not a default.
 
+Each entry carries its `id`, and that is the number `propose_fix` and an
+anchored `edit_files` want. Use the id of the hypothesis whose experiment you
+actually saw fail. If none of them is the one you reproduced, leave
+`hypothesis_id` out — the gate will tell you what it wanted. NEVER guess an
+integer to satisfy the field: the gate exists to make a fix traceable to an
+observed failure, and a guessed id defeats it while looking compliant.
+
 Return ONLY a JSON object:
 {{
   "reply": "what you say to the user",
@@ -97,7 +104,8 @@ Return ONLY a JSON object:
                  "search": "a web query", "why": "..."}},
   "dispute": {{"memory_ref": "event:...", "reading": "what it means now"}},
   "experiment": [{{"hypothesis": "the question the run settles",
-                  "source": "the python to run",
+                  "source": "the python to run — OR omit it and give `command`",
+                  "command": ["python3", "-m", "pytest", "tests/", "-q"],
                   "expect": {{"exit_zero": true, "stdout_has": "..."}},
                   "files": {{"lib.py": "..."}}, "note": "..."}}],
   "propose_fix": {{"hypothesis_id": 1, "description": "..."}},
@@ -107,8 +115,32 @@ Return ONLY a JSON object:
   "retire": {{"memory_refs": ["event:...", ...], "reason": "..."}},
   "spawn": [{{"kind": "deep|scout", "task": "...",
               "scope": ["path/it/owns.py"]}}],
-  "request_subagents": {{"kind": "deep|scout", "count": 1, "why": "..."}}
+  "request_subagents": {{"kind": "deep|scout", "count": 1, "why": "..."}},
+  "continue_work": "the next thing you will do, addressed to yourself"
 }}
+
+WORKING ON WITHOUT BEING ASKED AGAIN. `continue_work` names the next step you
+intend to take. When the user has started an automation run, the engine feeds
+it straight back to you as the next turn and you carry on; otherwise it is
+recorded and nothing happens. Either way `reply` is still what you say to the
+user now — say where you have got to, not "working on it".
+
+Use it when the work is genuinely unfinished and you know the next move:
+
+- An experiment came back INCONCLUSIVE and you can see what to fix about the
+  run itself.
+- You landed an edit and have not yet run anything that exercises it.
+- You outlined a file and need the bodies before you can say anything true.
+- A hypothesis is open, under-evidenced, and you know which run would move it.
+
+Leave it out when you are done, when you are blocked on something only the
+user can decide, or when you would only be restating what you just did. An
+absent `continue_work` ENDS the run, so omitting it is how you finish — and
+finishing with an honest "here is what I could not establish" is a better
+outcome than another round that adds nothing.
+
+Name a DIFFERENT next step each time. Repeating the previous one is how a
+loop spins, and the engine stops a run that stops changing.
 
 RUNNING CODE. `experiment` runs Python in a sandbox and grades the result
 against your prediction, mechanically, outside you. Four rules the engine

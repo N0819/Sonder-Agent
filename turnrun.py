@@ -76,6 +76,20 @@ class TurnRun:
         # interrupt, so halting also kills what the turn is waiting on, which
         # makes the flag observable almost immediately.
         self._procs = set()
+        # Messages the user sent WHILE this run was working.
+        #
+        # A run that can only be started and stopped is a batch job with a
+        # cancel button. The thing that makes an agent feel steerable is that
+        # a correction arriving in the middle is READ in the middle — before
+        # the work it would have changed is finished — rather than queued
+        # behind a turn that is already going the wrong way. Halting to say
+        # one sentence throws away everything the run had established.
+        #
+        # Drained at the two places a run can safely change its mind: between
+        # deliberation rounds, and between iterations of an automation loop.
+        # Never inside the commit, for the same reason a halt is not.
+        self._inbox = []
+        self._heard = []
         self._cond = threading.Condition()
 
     # -- producer side, called from the worker thread --
@@ -148,6 +162,43 @@ class TurnRun:
             self._procs.clear()
             self._cond.notify_all()
             return "halting"
+
+    def say(self, text):
+        """Hand the running turn a message. Returns what happened.
+
+        Refused once the run is over, and the refusal is reported rather than
+        swallowed: a message typed into a finished run has to become an
+        ordinary new turn, and a UI that showed it as delivered would have
+        dropped it silently."""
+        text = str(text or "").strip()
+        if not text:
+            return "empty"
+        with self._cond:
+            if self.status != "running":
+                return "not_running"
+            self._inbox.append(text)
+            self._heard.append(text)
+            self._cond.notify_all()
+        # Outside the lock: `emit` takes the same non-reentrant condition.
+        self.emit("heard", text=text[:2000])
+        return "delivered"
+
+    def drain_inbox(self):
+        """Everything said since the last drain, and clear it.
+
+        Drain-and-clear rather than read-and-mark, because the failure of the
+        second form is delivering the same correction twice — which reads to
+        the model as the user repeating themselves, i.e. as not having been
+        listened to the first time."""
+        with self._cond:
+            got, self._inbox = self._inbox, []
+        return got
+
+    def heard(self):
+        """Everything the user has said to this run, drained or not. The
+        record; `drain_inbox` is the queue."""
+        with self._cond:
+            return list(self._heard)
 
     def follow(self, timeout=600.0, since=0, heartbeat=None):
         """Yield events from `since`, then live ones until the run ends.

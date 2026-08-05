@@ -262,3 +262,62 @@ def test_a_dropped_experiment_says_which_half_is_missing(temp_db, tmp_path):
 
     assert "dropped an experiment with no hypothesis" in warns
     assert "dropped an experiment with no source or command" in warns
+
+
+def test_open_research_carries_the_id_the_gates_ask_for(temp_db):
+    """`propose_fix` and an anchored `edit_files` both take a numeric
+    `hypothesis_id`, and this payload described the open questions in prose
+    without ever naming one — so the only way to fill those fields was to
+    guess an integer, which is exactly the ritual the reproduce-before-you-fix
+    gate exists to prevent. The assistant hit it, declined to guess, and
+    reported the gap. A field the engine requires and the payload withholds is
+    the engine's defect."""
+    import research
+    hyp = research.open_hypothesis("does the harness grade a break?", 1)
+    _stub(respond={"reply": "noted"})
+    captured = {}
+
+    def watch(system, user):
+        captured.update(json.loads(user))
+        return json.dumps({"reply": "noted"})
+    providers.set_chat_stub(watch)
+
+    pipeline.run_turn("what is open?")
+
+    ids = [h["id"] for h in captured["open_research"]]
+    assert hyp["id"] in ids
+
+
+def test_a_message_sent_mid_turn_is_read_by_the_same_turn(temp_db):
+    """THE DIFFERENCE BETWEEN A BATCH JOB AND SOMETHING STEERABLE. A
+    correction read only after the turn ends is a correction applied to work
+    already finished, so the only way to redirect was to halt — throwing away
+    everything the turn had established in order to say one sentence.
+
+    Delivered as a separate item rather than merged into the original message:
+    the model has to be able to tell "you asked me this" from "you have since
+    said this", because the second usually overrides the first."""
+    import turnrun
+    run = turnrun.create("x", None)
+    rounds = []
+
+    def fn(system, user):
+        payload = json.loads(user)
+        if "user_message" not in payload:
+            return json.dumps({"summary": "", "received_summary": "",
+                               "surmise_summary": "", "key_phrases": [],
+                               "unresolved_threads": []})
+        rounds.append(payload.get("what_i_went_and_got") or [])
+        if len(rounds) == 1:
+            run.say("actually, leave that file alone")
+            return json.dumps({"reply": "",
+                               "need_more": {"ponder": "what do I know?"}})
+        return json.dumps({"reply": "understood"})
+    providers.set_chat_stub(fn)
+
+    pipeline.run_turn("refactor everything", run=run)
+
+    assert len(rounds) == 2, "the turn never went back for a second round"
+    said = [item for item in rounds[1] if item.get("got") == "the user, mid-turn"]
+    assert [s["said"] for s in said] == ["actually, leave that file alone"]
+    assert run.drain_inbox() == []          # delivered once, not re-delivered

@@ -150,6 +150,22 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
         run.emit("respond", state=("calling the model" if round_no == 1
                                    else f"deliberating (round {round_no})"),
                  round=round_no)
+        # THE USER MAY SPEAK WHILE IT IS THINKING, and be heard THIS turn.
+        # A correction that arrives mid-turn and is not read until the turn
+        # ends is a correction applied to work already finished — so the only
+        # way to redirect was to halt, which throws away everything the turn
+        # had established to say one sentence. Read at a round boundary, which
+        # is where the loop already re-decides what to do next.
+        #
+        # Carried in `what_i_went_and_got` rather than by rewriting the
+        # original message: the model must be able to tell "you asked me this"
+        # from "you have since said this", because the second usually
+        # overrides the first and it cannot know that if they are merged.
+        for said in run.drain_inbox():
+            deliberation.append({"got": "the user, mid-turn", "said": said,
+                                 "note": "this arrived AFTER the message you "
+                                         "are answering; where the two "
+                                         "conflict, this one is current"})
         body = dict(payload)
         if deliberation:
             body["what_i_went_and_got"] = deliberation
@@ -270,6 +286,9 @@ class _Unobserved:
     def enter_commit(self):
         pass
 
+    def drain_inbox(self):
+        return ()
+
 
 _UNOBSERVED = _Unobserved()
 
@@ -361,7 +380,17 @@ def run_turn(user_text, session_id=None, run=None):
         # is evidence and moves confidence — it does not close a question, so
         # "open" after a confirmed run is correct rather than stuck.
         "open_research": [
-            {"question": h["question"], "status": h["status"],
+            # THE ID, BECAUSE TWO GATES ASK FOR IT BY NUMBER. `propose_fix`
+            # and an anchored `edit_files` both take a `hypothesis_id`, and
+            # this payload described the open questions in prose without ever
+            # naming one — so the only way to satisfy those fields was to
+            # guess an integer, which is precisely the ritual the
+            # reproduce-before-you-fix gate exists to prevent. The assistant
+            # hit it and declined to guess, correctly, and reported the gap
+            # rather than routing around it. A field the engine requires and
+            # the payload withholds is the engine's defect.
+            {"id": h["id"],
+             "question": h["question"], "status": h["status"],
              "confidence": h["confidence"],
              # The prior travels too. The tally alone was not enough: three
              # hypotheses at 0.545 with `supports: 1` apiece still read as
@@ -419,6 +448,17 @@ def run_turn(user_text, session_id=None, run=None):
     # know, and a UI that decides by string-matching "failed" in a warning
     # would silently stop offering retry the day a message is reworded.
     respond_ok = out is not None
+    # WHAT IT INTENDS TO DO NEXT, if anything — read here, acted on by
+    # `autoloop`. A turn that fails to compose a reply asks for nothing: a
+    # provider error must not be able to drive an automation loop, and an
+    # absent field stops rather than continues, so the way this mechanism
+    # fails is by halting.
+    continue_work = ""
+    if respond_ok:
+        nxt = out.get("continue_work")
+        if isinstance(nxt, dict):
+            nxt = nxt.get("next")
+        continue_work = str(nxt or "").strip()[:2000]
     run.emit("respond", state="answered" if respond_ok else "no usable answer",
              ok=respond_ok,
              ponder=((out or {}).get("ponder") or {}).get("query") or "",
@@ -907,7 +947,7 @@ def run_turn(user_text, session_id=None, run=None):
             warnings.append(f"consolidation failed: {str(exc)[:200]}")
 
     return {"reply": reply, "warnings": warnings, "trace": trace,
-            "respond_ok": respond_ok,
+            "respond_ok": respond_ok, "continue_work": continue_work,
             "session_id": session_id, "turn_idx": turn_idx,
             "turn_id": turn_id}
 

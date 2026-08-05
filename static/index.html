@@ -31,7 +31,18 @@
         <!-- Shown only while a turn is in flight: a halt button that is
              always visible is a halt button that is usually a no-op. -->
         <button type="button" id="halt" style="display:none">Halt</button>
+        <!-- Automation: turns chain until it stops asking for another. A
+             checkbox rather than a mode, because the same composer sends
+             both and the difference is only in when the run ends. -->
+        <label id="autowrap" title="Keep working until it is done, or until
+you stop it. You can still type while it runs.">
+          <input type="checkbox" id="auto"> keep working
+        </label>
       </form>
+      <!-- The send box does not lock during an automation run: what you type
+           reaches the run at its next round boundary instead of queueing
+           behind work it would have changed. -->
+      <div id="running-hint" style="display:none"></div>
     </section>
     <section id="panel-memory" class="panel">
       <form id="memsearch"><input id="memquery"
