@@ -137,14 +137,23 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
     instead of quietly assuming memory had the answer. That is the difference
     between a loop that converges and one that repeats itself.
 
-    Returns `(out, deliberation, delivered)` — `delivered` being the memory
-    refs this stage handed over MID-TURN. They have to reach the citation gate
-    or the assistant is given material it is then forbidden to cite, which is
-    indistinguishable from not having looked."""
+    Returns `(out, deliberation, delivered, cost)` — `delivered` being the
+    memory refs this stage handed over MID-TURN. They have to reach the
+    citation gate or the assistant is given material it is then forbidden to
+    cite, which is indistinguishable from not having looked.
+
+    `cost` is the measurement, not an estimate: the system prompt is re-sent
+    on EVERY round and the payload grows as `what_i_went_and_got` accumulates,
+    so the price of a turn is a sum over rounds and nothing recorded it. Every
+    proposal to make this cheaper — trim recall, route sections, cache the
+    prefix — was an argument about numbers no one had. Recorded against every
+    turn, so the denominator is turns that HAD the opportunity to deliberate
+    rather than turns that did."""
     system = prompts.render(prompts.RESPOND_SYSTEM,
                             persona=persona.persona_prompt(persona_sheet))
     deliberation = []
     delivered = set()
+    cost = {"system_chars": len(system), "rounds": []}
     out = None
     for round_no in range(1, DELIBERATION_MAX_ROUNDS + 1):
         run.halted()
@@ -178,11 +187,13 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
         if deliberation:
             body["what_i_went_and_got"] = deliberation
         body["deliberation_rounds_left"] = DELIBERATION_MAX_ROUNDS - round_no
-        out = parse_model_json(chat_complete(system,
-                                             json.dumps(body,
-                                                        ensure_ascii=False)))
+        # Serialised once and measured, rather than measured by serialising a
+        # second time: the instrument must not become a cost of its own.
+        sent = json.dumps(body, ensure_ascii=False)
+        cost["rounds"].append(len(sent))
+        out = parse_model_json(chat_complete(system, sent))
         if out is None:
-            return None, deliberation, delivered
+            return None, deliberation, delivered, cost
         more = out.get("need_more")
         if not isinstance(more, dict) or round_no == DELIBERATION_MAX_ROUNDS:
             break
@@ -191,7 +202,7 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
         if not step:
             break                 # nothing to fetch: the answer it has stands
         deliberation.append(step)
-    return out, deliberation, delivered
+    return out, deliberation, delivered, cost
 
 
 def _gather(more, turn_idx, session_id, run, warnings):
@@ -468,8 +479,20 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
     run.halted()
     if chat_configured():
         try:
-            out, deliberation, mid_turn_refs = _deliberate(
+            out, deliberation, mid_turn_refs, cost = _deliberate(
                 payload, persona_sheet, turn_idx, session_id, run, warnings)
+            # WHAT THE TURN COST, BROKEN DOWN WHERE A DECISION COULD ACT ON
+            # IT. A total says the turn was expensive; a section says which
+            # proposal would have helped. Recorded every turn, including the
+            # single-round ones — the interesting question is what share of
+            # turns pay the multiplier, and that needs the cheap turns in the
+            # denominator too.
+            cost["sections"] = {k: len(json.dumps(v, ensure_ascii=False,
+                                                  default=str))
+                                for k, v in payload.items()}
+            cost["total_chars"] = (cost["system_chars"] * len(cost["rounds"])
+                                   + sum(cost["rounds"]))
+            trace["payload_cost"] = cost
             # The gate's definition of "delivered" has to include what the
             # deliberation loop went and fetched. It was fixed at stage 1, so
             # a memory the assistant asked for and received DURING the turn

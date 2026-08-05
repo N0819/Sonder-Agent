@@ -397,3 +397,27 @@ def test_no_plan_means_no_work_in_progress_key(temp_db):
     pipeline.run_turn("hello")
 
     assert "work_in_progress" not in captured
+
+
+def test_a_turn_records_what_it_cost_and_where(temp_db):
+    """NOTHING RECORDED THE PRICE OF A TURN, so every proposal to lower it —
+    trim recall, route sections by question type, cache the prefix — was an
+    argument about numbers no one had. The system prompt is re-sent on every
+    deliberation round and the payload grows as the loop gathers, so the cost
+    is a sum over rounds that cannot be reconstructed from a total. Broken
+    down by section because a total says the turn was expensive and a section
+    says which proposal would have helped."""
+    _stub(respond={"reply": "ok"})
+    result = pipeline.run_turn("what did I say about the deploy?")
+
+    cost = result["trace"]["payload_cost"]
+    assert cost["system_chars"] > 0
+    assert len(cost["rounds"]) >= 1
+    # The system prompt is paid once PER ROUND, not once per turn — the whole
+    # point of the number is that it multiplies.
+    assert cost["total_chars"] == (cost["system_chars"] * len(cost["rounds"])
+                                   + sum(cost["rounds"]))
+    # Recall is the section every proposal is about, so it has to be nameable
+    # rather than folded into a total.
+    assert "memory" in cost["sections"]
+    assert cost["sections"]["user_message"] > 0
