@@ -5,6 +5,7 @@
 # depend on a model cooperating.
 
 import json
+import os
 
 import beliefs
 import memory
@@ -839,3 +840,96 @@ def test_an_experiment_naming_an_unknown_hypothesis_says_so(temp_db, tmp_path):
     assert any("9999" in w and "not among the ids offered" in w
                for w in out["trace"]["warnings"]), out["trace"]["warnings"]
     assert out["trace"]["experiments"][0]["hypothesis_id"] != 9999
+
+
+def _story_engine(tmp_path):
+    """A miniature engine database, registered the way the real one is."""
+    import sqlite3
+    import refdb
+    path = tmp_path / "engine.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE chats(id INTEGER PRIMARY KEY, name TEXT, scenario TEXT,
+                           created REAL, branched_from TEXT);
+        CREATE TABLE turns(id INTEGER PRIMARY KEY, chat_id INT, idx INT,
+                           player_input TEXT, created REAL);
+        CREATE TABLE steps(id INTEGER PRIMARY KEY, turn_id INT, key TEXT,
+                           label TEXT, ord INT, stale INT DEFAULT 0);
+        CREATE TABLE variants(id INTEGER PRIMARY KEY, step_id INT,
+                              content TEXT, active INT, reasoning TEXT);
+        INSERT INTO chats VALUES(46,'The Blizzard','Snow.',1.0,'[]');
+        INSERT INTO turns VALUES(700,46,0,'the player types',1.0);
+        INSERT INTO steps VALUES(7000,700,'narrator','Narrator',0,0);
+        INSERT INTO variants VALUES(1,7000,'{"prose":"the door blew open"}',1,'');
+    """)
+    conn.commit()
+    conn.close()
+    refdb.configure({"engine": str(path)})
+    return path
+
+
+def test_a_story_can_be_reached_by_the_name_a_bug_report_uses(tmp_path):
+    """The verb exists because the SQL was never the hard part: a story is
+    named by a person and keyed by an integer nobody knows, and every
+    investigation used to begin by rediscovering that.
+    """
+    import refdb
+    _story_engine(tmp_path)
+    try:
+        step, _refs = pipeline._gather(
+            {"story": {"verb": "find_story", "name": "Blizzard"}}, 1, 0,
+            _NullRun(), [])
+        assert step["story"]["matches"][0]["chat_id"] == "46"
+        detail, _refs = pipeline._gather(
+            {"story": {"verb": "turn_detail", "chat_id": 46, "turn": 0}}, 1, 0,
+            _NullRun(), [])
+        assert "the door blew open" in detail["story"]["steps"][0]["content"]
+    finally:
+        refdb.configure({})
+
+
+def test_an_unknown_verb_names_the_verbs_that_exist(tmp_path):
+    """A round spent on a typo costs the same as a round spent on the defect,
+    and the round after it goes to a second guess at the spelling.
+    """
+    import refdb
+    _story_engine(tmp_path)
+    try:
+        step, _refs = pipeline._gather(
+            {"story": {"verb": "find_chat", "name": "Blizzard"}}, 1, 0,
+            _NullRun(), [])
+        assert step["story"]["ok"] is False
+        assert "find_story" in step["story"]["error"]
+        assert "turn_detail" in step["story"]["error"]
+    finally:
+        refdb.configure({})
+
+
+def test_a_verb_that_raises_does_not_take_the_round_with_it(tmp_path):
+    """A deliberation round asks for several things at once. A traceback in
+    one lane would lose the answers to all the others, and the failure IS the
+    answer for the lane that failed.
+    """
+    step, _refs = pipeline._gather(
+        {"engine_lab": {"verb": "seed", "lab": "nope", "story": None}}, 1, 0,
+        _NullRun(), [])
+    assert step["engine_lab"]["ok"] is False
+    assert step["engine_lab"]["error"]
+
+
+def test_the_labs_on_disk_are_shown_in_the_payload(tmp_path):
+    """A LAB SURVIVES THE TURN THAT MADE IT — that is the whole reason it is on
+    disk. An assistant that cannot see the one it provisioned last turn will
+    provision another, and then attribute the second one's fresh story to the
+    first one's edit.
+    """
+    import enginelab
+    enginelab.configure(root=str(tmp_path / "labs"), source="", engine_db="")
+    try:
+        os.makedirs(str(tmp_path / "labs" / "lamp"), exist_ok=True)
+        step, _refs = pipeline._gather(
+            {"engine_lab": {"verb": "list"}}, 1, 0, _NullRun(), [])
+        assert [entry["name"] for entry in step["engine_lab"]["labs"]] == ["lamp"]
+        assert step["engine_lab"]["labs"][0]["provisioned"] is False
+    finally:
+        enginelab.configure(root="", source="", engine_db="")

@@ -112,6 +112,8 @@ Return ONLY a JSON object:
                  "outline": "coding.py", "expand_chunks": ["c1a2b3"],
                  "read_file": "_runs/ab12cd34/counts.txt",
                  "query_db": {{"database": "engine", "sql": "SELECT ..."}},
+                 "story": {{"verb": "find_story", "name": "The Blizzard"}},
+                 "engine_lab": {{"verb": "play", "lab": "lamp", "text": "..."}},
                  "search": "a web query", "why": "..."}},
   "dispute": {{"memory_ref": "event:...", "reading": "what it means now"}},
   "experiment": [{{"hypothesis": "the question the run settles",
@@ -401,6 +403,77 @@ something you do not have in front of you:
   holding a sample, and a sample cannot answer "how many" or "does this ever
   happen" — re-ask with a COUNT or a narrower filter rather than counting the
   rows you were handed.
+- `need_more.story` reads a story out of a live engine database the way a bug
+  report addresses it: by the name a person says and the turn they counted.
+  `query_db` can reach every row of this and the SQL was never the hard part —
+  a story is named by a person and keyed by an integer, turns are numbered per
+  chat, and what the agents actually said is a join past that. These verbs
+  know the schema so a report does not have to.
+    * `{{"verb": "find_story", "name": "the Blizzard"}}` — substring match,
+      returns every candidate with its turn count. IT WILL NOT PICK ONE FOR
+      YOU when several match, and several usually do: branches are named by
+      suffixing the parent, so 'Run!' is three chats of 12, 26 and 42 turns.
+      When `ambiguous` is true, say so and ask which — investigating the wrong
+      transcript produces a theory that is internally consistent, checkable
+      against real turns, and about another story. Nothing downstream catches
+      that.
+    * `{{"verb": "overview", "chat_id": 46}}` — length, cast, branches, and
+      where steps are marked stale. Cheap; run it before any theory, because
+      "around turn 40" means something different in a 7-turn story.
+    * `{{"verb": "turns", "chat_id": 46, "from_turn": 38, "to_turn": 44}}` —
+      the census: what the player typed each turn, which agents ran, how many
+      of their outputs are stale.
+    * `{{"verb": "turn_detail", "chat_id": 46, "turn": 41}}` — every agent's
+      actual output for that turn, and `"step": "narrator"` for one of them at
+      full length.
+    * `{{"verb": "memories", "chat_id": 46, "from_turn": 38, "to_turn": 44}}`
+      — what the turn committed, with provenance and salience.
+    * `{{"verb": "schema"}}` or `{{"verb": "schema", "table": "frames"}}` for
+      anything these do not reach; then `query_db` for the bespoke question.
+  THE PROSE IS THE LAST PLACE THE DEFECT BECAME VISIBLE, not the first place
+  it became wrong. The engine runs a turn as a chain — director, mapping,
+  perception, the character loop, narrator, commit — each reading the one
+  before. A contradiction the player noticed in the narration was usually
+  decided several steps upstream, and a fix aimed at the narrator makes the
+  symptom go away on that turn and leaves the cause. Read the chain in order
+  and name the earliest step whose output is already wrong. Say which step
+  that is, and quote the line of its output that shows it.
+- `need_more.engine_lab` is an engine of your own: a scratch database, seeded
+  with a story you wrote, running the code in your workspace. This is how a
+  theory about the engine becomes an observation. Until it exists a proposed
+  repair can only be argued, and this project's first rule is that a fix for a
+  defect never observed failing cannot afterwards be told apart from a fix for
+  nothing.
+    * `{{"verb": "provision", "lab": "lamp"}}` — fresh database on the engine's
+      own schema, with the live engine's provider and model configuration
+      copied in so it can actually reach a model. Add `"reset": true` to
+      rebuild one. The credentials are copied by a child process and are never
+      returned to you; `key_chars` is all you get, and it is all you need.
+    * `{{"verb": "seed", "lab": "lamp", "story": {{"name": ..., "scenario":
+      ..., "persona": {{...}}, "characters": [{{...}}], "world": {{...}}}}}}` —
+      the scenario is the opening situation every agent reads, so write it as
+      a situation with people in it rather than a premise.
+    * `{{"verb": "play", "lab": "lamp", "text": "what the player typed"}}` —
+      runs one turn. IT RETURNS BEFORE IT FINISHES. A turn is a dozen model
+      calls and takes minutes; you get a run handle, and the lab is on disk, so
+      the result is still there next turn. Poll with `{{"verb": "runs",
+      "lab": "lamp"}}`, which reports `running`, `done` or `failed` — a run
+      that is `failed` carries the tail of the log, which is where the
+      traceback is.
+    * `{{"verb": "query", "lab": "lamp", "sql": "..."}}` reads the lab's own
+      database — same statement gate, same caps as `query_db`. This is how you
+      read the trace of a turn you just ran.
+    * `{{"verb": "list"}}`, and `{{"verb": "destroy", "lab": "lamp"}}` when a
+      lab has answered its question.
+  THE LAB RUNS THE CODE IN YOUR WORKSPACE, not the installed engine. That is
+  the point of it: change `Sonder_Engine_working`, play the turn, and the
+  difference is evidence. It also means a lab result is only about the tree as
+  it stood when the turn ran — if you edit between starting a run and reading
+  it, you have measured neither version. Start runs after your edits, not
+  before.
+  A LAB TURN COSTS REAL MODEL CALLS. Run one to settle a question you have
+  written down, not to see what happens. Two turns that differ by one edit
+  settle far more than six that differ by everything.
 - TO EDIT A FILE YOU HAVE NOT READ: outline it, expand the pieces you will
   change, then anchor `replace` on text copied from the expansion. Never
   anchor on a gist — a gist is a description, not the line.

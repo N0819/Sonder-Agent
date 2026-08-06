@@ -28,11 +28,13 @@ import json
 
 import beliefs
 import coding
+import enginelab
 import memory
 import persona
 import prompts
 import chunks
 import refdb
+import storydb
 import research
 import sandbox
 import subagents
@@ -299,6 +301,65 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
     return out, deliberation, delivered, cost
 
 
+def _dispatch(spec, table, what):
+    """Run one named verb from a table, or say which names exist.
+
+    AN UNKNOWN VERB NAMES THE KNOWN ONES. The alternative — "unknown verb" —
+    costs a whole round to a typo, and the round after that to a second guess
+    at the spelling. The list is short and this is the only place it is not
+    already written down.
+    """
+    verb = str(spec.get("verb") or "").strip()
+    if verb not in table:
+        return {"ok": False,
+                "error": f"{verb!r} is not a {what} verb — these are: "
+                         + ", ".join(sorted(table))}
+    try:
+        return table[verb](spec)
+    except Exception as exc:  # noqa: BLE001 - a verb failure is a result
+        # A traceback here would kill the deliberation round and lose every
+        # other thing the same round asked for. The failure is the answer.
+        return {"ok": False, "verb": verb,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _story_lane(spec):
+    """Read a story out of a live engine database by the name a person uses."""
+    database = str(spec.get("database") or storydb.DEFAULT_DATABASE)
+    return _dispatch(spec, {
+        "find_story": lambda s: storydb.find_story(
+            s.get("name") or s.get("story"), database=database),
+        "overview": lambda s: storydb.story_overview(
+            s.get("chat_id"), database=database),
+        "turns": lambda s: storydb.story_turns(
+            s.get("chat_id"), s.get("from_turn"), s.get("to_turn"),
+            database=database),
+        "turn_detail": lambda s: storydb.turn_detail(
+            s.get("chat_id"), s.get("turn"), s.get("step"), database=database),
+        "memories": lambda s: storydb.story_memories(
+            s.get("chat_id"), s.get("from_turn"), s.get("to_turn"),
+            database=database),
+        "schema": lambda s: storydb.schema(s.get("table"), database=database),
+    }, "story")
+
+
+def _lab_lane(spec):
+    """Provision, seed and drive a scratch engine that is safe to break."""
+    name = str(spec.get("lab") or "").strip()
+    return _dispatch(spec, {
+        "list": lambda s: {"ok": True, "labs": enginelab.labs()},
+        "provision": lambda s: enginelab.provision(
+            name, source=s.get("source"), reset=bool(s.get("reset"))),
+        "seed": lambda s: enginelab.seed(name, s.get("story")),
+        "play": lambda s: enginelab.play(
+            name, s.get("text") or "", chat_id=s.get("chat_id")),
+        "runs": lambda s: enginelab.runs(name, s.get("run")),
+        "stop": lambda s: enginelab.stop(name),
+        "query": lambda s: enginelab.lab_query(name, s.get("sql")),
+        "destroy": lambda s: enginelab.destroy(name),
+    }, "engine_lab")
+
+
 def _gather(more, turn_idx, session_id, run, warnings):
     """Fetch what a deliberation round asked for. Deterministic; no judgement
     about whether the request was wise — that is the model's to make and the
@@ -400,6 +461,27 @@ def _gather(more, turn_idx, session_id, run, warnings):
         run.emit("query_db", database=str(dbq.get("database") or "")[:40],
                  rows=step["db_query"].get("row_count", 0),
                  error=str(step["db_query"].get("error") or "")[:120])
+    # AND THE SAME DATA ADDRESSED THE WAY A BUG REPORT ADDRESSES IT. `query_db`
+    # can reach all of this and did, at the cost of rediscovering the schema
+    # every investigation: a story is named by a person and keyed by an
+    # integer, turns are numbered per chat, and what the agents actually said
+    # is one join further on. None of that is guessable from "the Blizzard
+    # story broke around turn 40", so it was guessed. See `storydb`.
+    story = more.get("story")
+    if isinstance(story, dict) and story:
+        step["story"] = _story_lane(story)
+        run.emit("story", verb=str(story.get("verb") or "")[:20],
+                 ok=bool(step["story"].get("ok")),
+                 detail=str(step["story"].get("error")
+                            or step["story"].get("note") or "")[:120])
+    lab = more.get("engine_lab")
+    if isinstance(lab, dict) and lab:
+        step["engine_lab"] = _lab_lane(lab)
+        run.emit("engine_lab", verb=str(lab.get("verb") or "")[:20],
+                 lab=str(lab.get("lab") or "")[:40],
+                 ok=bool(step["engine_lab"].get("ok")),
+                 detail=str(step["engine_lab"].get("error")
+                            or step["engine_lab"].get("note") or "")[:120])
     ids = more.get("expand_chunks")
     if isinstance(ids, list) and ids:
         expanded = chunks.expand(session_id, ids)
@@ -633,6 +715,12 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
         # naming them is one line per database against a lane that reaches
         # data no other lane can carry.
         "reference_databases": refdb.databases(),
+        # THE LABS ARE STATE, and state that is not shown is state that gets
+        # rebuilt. A lab survives the turn that made it — that is the whole
+        # point of putting it on disk — so an assistant that cannot see the
+        # one it provisioned last turn will provision another, and then
+        # attribute the second one's fresh story to the first one's edit.
+        "engine_labs": enginelab.labs(),
         # A DIGEST, not the whole map. `codemap_for` bounded by file count and
         # produced 97 KB for a 115-file upload — enough to break the turn
         # outright, and long before that, enough to spend the context on
