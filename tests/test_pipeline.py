@@ -836,6 +836,6 @@ def test_an_experiment_naming_an_unknown_hypothesis_says_so(temp_db, tmp_path):
                                    "source": "print('ok')\n",
                                    "expect": {"stdout_has": "ok"}}]})
     out = pipeline.run_turn("run it")
-    assert any("9999" in w and "does not exist" in w
+    assert any("9999" in w and "not among the ids offered" in w
                for w in out["trace"]["warnings"]), out["trace"]["warnings"]
     assert out["trace"]["experiments"][0]["hypothesis_id"] != 9999

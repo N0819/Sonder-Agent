@@ -819,6 +819,10 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
     # nothing, and `propose_fix` refuses a fix for a defect never observed
     # failing. This stage only routes.
     experiments = []
+    # The ids this turn actually OFFERED. Snapshotted from the payload that
+    # was sent, not re-read from the table — see the attach block below.
+    offered_hypotheses = {h["id"] for h in (payload.get("open_research") or [])
+                          if isinstance(h, dict) and h.get("id") is not None}
     for spec in (out.get("experiment") or [])[:3]:
         if not isinstance(spec, dict):
             continue
@@ -868,22 +872,27 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
         # the ritual the whole gate discipline exists to prevent, and an
         # attached run is the one place where a wrong id is invisible
         # afterwards: a misfiled row reads exactly like a correct one.
+        # CHECKED AGAINST THE IDS ACTUALLY SENT, not against the table.
+        # Re-querying accepts any open row, so a guessed integer that happens
+        # to land on one reads as a deliberate attachment — the exact ritual
+        # this is guarded against. `open_research` in the payload above is the
+        # list the assistant actually chose from, and stage 4 can open
+        # hypotheses of its own after it was built, so the two sets genuinely
+        # differ. (Caught by the assistant reviewing this change in its own
+        # copy of the source; the first version of this checked the table.)
         attached = None
         want = spec.get("hypothesis_id")
         if want is not None:
             try:
-                offered = research.get_hypothesis(int(want))
+                candidate = int(want)
             except (TypeError, ValueError):
-                offered = None
-            if offered is None:
-                warnings.append(f"experiment named hypothesis {want}, which "
-                                "does not exist — opened a new one instead")
-            elif str(offered["status"] or "") not in ("open", "disputed"):
-                warnings.append(f"experiment named hypothesis {want}, which "
-                                f"is {offered['status']} — opened a new one "
-                                "instead")
-            else:
-                attached = offered
+                candidate = None
+            if candidate is not None and candidate in offered_hypotheses:
+                attached = research.get_hypothesis(candidate)
+            if attached is None:
+                warnings.append(
+                    f"experiment named hypothesis {want}, which was not among "
+                    "the ids offered this turn — opened a new one instead")
         hyp = attached or research.open_hypothesis(question, turn_idx,
                                                    session_id)
         # The user's uploaded files are the working set: "run the tests in
