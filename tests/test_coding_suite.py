@@ -993,6 +993,33 @@ def test_an_experiment_can_run_inside_the_project_it_is_testing(temp_db):
     assert "STATIC True" in inside["stdout"]
 
 
+def test_a_run_imports_from_the_directory_it_runs_in(temp_db):
+    """PYTHONPATH carried the workspace root and nothing else, and Python puts
+    the SCRIPT's directory on sys.path rather than the working directory. So
+    once the default command learned to reach a `main.py` at the root from a
+    `cwd` below it, the program started and then could not import the project
+    it had been pointed at — `ModuleNotFoundError: No module named 'db'` from
+    a run whose whole purpose was to read `db.py`. Half-working is the worst
+    of the three states: the first version could not find the program, the
+    second found it and stranded it, and only the failure moved."""
+    files = {"proj/lib.py": "VALUE = 'from-cwd'\n",
+             "main.py": "import lib\nprint('OK', lib.VALUE)\n"}
+    out = sandbox.run(files, [sys.executable, "-s", "../main.py"], cwd="proj")
+    assert out["exit_code"] == 0, out["stderr"]
+    assert "OK from-cwd" in out["stdout"]
+
+
+def test_the_workspace_root_stays_importable_from_a_subdirectory(temp_db):
+    """Adding the run directory must not displace the root: a run in `proj/`
+    still has to reach a helper the caller left at the top."""
+    files = {"shared.py": "NAME = 'at-the-root'\n",
+             "proj/keep.py": "x = 1\n",
+             "main.py": "import shared\nprint('OK', shared.NAME)\n"}
+    out = sandbox.run(files, [sys.executable, "-s", "../main.py"], cwd="proj")
+    assert out["exit_code"] == 0, out["stderr"]
+    assert "OK at-the-root" in out["stdout"]
+
+
 def test_a_run_directory_outside_the_workspace_is_refused(temp_db):
     """A generated path is untrusted input here as everywhere else — and a cwd
     that quietly fell back to the root would reproduce the exact failure the

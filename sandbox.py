@@ -360,11 +360,25 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                     "stderr": f"no such directory in the workspace: {cwd!r}",
                     "truncated": False, "seconds": 0.0, "timed_out": False,
                     "harness": harness}
+        # A DIRECTORY YOU RUN IN IS A DIRECTORY YOU IMPORT FROM. PYTHONPATH
+        # carried the workspace root and nothing else, and Python puts the
+        # SCRIPT's directory on sys.path, not the working directory — so once
+        # the default command learned to reach a `main.py` at the root from a
+        # `cwd` below it, the program started and then could not import the
+        # project it had been pointed at:
+        #   ModuleNotFoundError: No module named 'db'
+        # from a run whose whole purpose was to read `db.py` two directories
+        # down. Half-working is the worst of the three states: the first
+        # version could not find the program, this one found it and stranded
+        # it, and only the failure moved.
+        paths = list(import_paths or [])
+        if run_dir != workspace:
+            paths.insert(0, run_dir)
         started = time.perf_counter()
         try:
             proc = subprocess.Popen(
                 command, cwd=run_dir,
-                env=_clean_env(workspace, import_paths),
+                env=_clean_env(workspace, paths),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 preexec_fn=_limits(timeout))
