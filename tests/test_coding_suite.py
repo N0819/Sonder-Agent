@@ -1122,3 +1122,40 @@ def test_source_overwriting_your_own_file_is_reported(temp_db):
     clean = coding.run_experiment(
         hyp["id"], source="print('x')", expect={"exit_zero": True}, turn_idx=1)
     assert clean["shadowed"] == ""
+
+
+def test_a_refusal_names_the_hypotheses_that_would_have_opened_it(temp_db):
+    """A refusal that misdiagnoses costs more than a silent one. `apply_edit`
+    told an assistant that had reproduced the defect four turns running to
+    "reproduce the defect before editing" — because its reproduction sat on a
+    neighbouring hypothesis id, which was the one thing the message could not
+    say. It wrote a fifth reproduction, then a sixth."""
+    import workspace
+    reproduced = research.open_hypothesis("does conn() leave a file?",
+                                          turn_idx=1)
+    coding.run_experiment(reproduced["id"], source="print('FILE_LEFT=True')\n",
+                          expect={"exit_zero": True,
+                                  "stdout_has": "FILE_LEFT=True",
+                                  "reproduces": True}, turn_idx=1)
+    unreproduced = research.open_hypothesis("something else entirely",
+                                            turn_idx=1)
+
+    out = coding.apply_edit("db.py", "guarded\n", turn_idx=1,
+                            hypothesis_id=unreproduced["id"], why="repair",
+                            session_id=1)
+    assert not out["ok"]
+    assert str(reproduced["id"]) in out["why"], out["why"]
+    assert "does conn() leave a file?" in out["why"]
+    assert "`fixes`" in out["why"]
+
+
+def test_a_refusal_does_not_offer_the_hypothesis_it_just_refused(temp_db):
+    """"Cite 7 instead of 7" is noise dressed as help, and a list that
+    includes the id already tried reads as though the gate contradicted
+    itself."""
+    hyp = research.open_hypothesis("only one open question", turn_idx=1)
+    out = coding.apply_edit("db.py", "x\n", turn_idx=1,
+                            hypothesis_id=hyp["id"], why="repair",
+                            session_id=1)
+    assert not out["ok"]
+    assert "HAVE been observed failing" not in out["why"], out["why"]

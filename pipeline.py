@@ -967,7 +967,22 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             continue
         target = spec.get("hypothesis_id")
         if target is None and str(spec.get("fixes") or "").strip() and experiments:
-            target = experiments[-1]["hypothesis_id"]
+            # THE ID OF THIS TURN'S REPRODUCTION CANNOT BE CITED, because
+            # `research.open_hypothesis` mints it at stage 4a — after the model
+            # composed this edit. The prompt promised otherwise ("run the
+            # experiment that reproduces the defect in the same turn and it
+            # will be there") and the promise was unkeepable: four consecutive
+            # turns reproduced the defect, cited the newest id they COULD name
+            # — the previous turn's — and were refused. `fixes` is how the
+            # promise is kept, and it was documented nowhere, so unreachable.
+            #
+            # The LAST FAILING one, not the last one. A turn that runs a
+            # baseline after its reproduction would otherwise aim the gate at
+            # the run where nothing failed, and be refused for the reproduction
+            # it did make.
+            failing = [e["hypothesis_id"] for e in experiments
+                       if coding.observed_failing(e["hypothesis_id"])]
+            target = (failing or [e["hypothesis_id"] for e in experiments])[-1]
         try:
             done = coding.apply_edit(
                 path, spec.get("contents"), turn_idx=turn_idx,

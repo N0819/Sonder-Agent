@@ -80,10 +80,19 @@ questions that received the same evidence, not a default.
 
 Each entry carries its `id`, and that is the number `propose_fix` and an
 anchored `edit_files` want. Use the id of the hypothesis whose experiment you
-actually saw fail. If none of them is the one you reproduced, leave
-`hypothesis_id` out — the gate will tell you what it wanted. NEVER guess an
-integer to satisfy the field: the gate exists to make a fix traceable to an
-observed failure, and a guessed id defeats it while looking compliant.
+actually saw fail. NEVER guess an integer to satisfy the field: the gate exists
+to make a fix traceable to an observed failure, and a guessed id defeats it
+while looking compliant.
+
+ONLY IDS LISTED ABOVE CAN BE CITED, and an experiment you run THIS turn is not
+among them — its hypothesis is opened after you have written this response, so
+its number does not exist yet. Reproducing a defect and fixing it in one turn
+is the ordinary case, so for that case say `"fixes": "<the hypothesis text you
+gave the experiment>"` on the edit and leave `hypothesis_id` out; the engine
+aims the gate at the reproduction you actually ran. Omitting BOTH says the edit
+is not a repair at all, which is true of a new test or a file the user asked
+for outright and false of a fix — the gate does not apply to an edit that
+claims neither, so an unclaimed fix is one that skipped it.
 
 Return ONLY a JSON object:
 {{
@@ -114,6 +123,7 @@ Return ONLY a JSON object:
                   "collect": ["counts.txt"]}}],
   "propose_fix": {{"hypothesis_id": 1, "description": "..."}},
   "edit_files": [{{"path": "src/thing.py", "why": "...", "hypothesis_id": 1,
+                  "fixes": "the hypothesis text, when the run was this turn",
                   "replace": [{{"old": "exact text now in the file",
                                "new": "what replaces it"}}]}}],
   "retire": {{"memory_refs": ["event:...", ...], "reason": "..."}},
@@ -258,12 +268,19 @@ here that outlives the turn. Two modes, and PREFER THE FIRST:
   indistinguishable afterwards from a deliberate deletion.
 Read before you edit (`need_more.expand_chunks`, or `list_dir` to find it):
 edit what is on disk, not what you remember of it.
-- Name a `hypothesis_id` when the edit FIXES something, and the reproduce-
-  before-you-fix gate applies: no observed failure, no edit. Run the
-  experiment that reproduces the defect in the same turn and it will be there.
-- Leave it out when the edit is not a repair — a new file, a test, something
-  the user asked for outright. Do not invent a hypothesis to satisfy the gate;
-  that makes it a ritual and it stops protecting anything.
+- Name a `hypothesis_id` when the edit FIXES something and the run that
+  reproduced it was in an EARLIER turn, so the id is listed in
+  `open_research`. The reproduce-before-you-fix gate applies: no observed
+  failure, no edit.
+- Say `fixes` instead when the reproduction ran in THIS turn — quote the
+  hypothesis text you gave the experiment. The id you would need does not
+  exist yet at the moment you write this, so citing the nearest number you
+  can see is a guess, and the gate refuses guesses.
+- Give NEITHER only when the edit is not a repair — a new file, a test,
+  something the user asked for outright. That is the one path the gate does
+  not check, so an edit that silently takes it is a fix that evaded the gate.
+  Do not invent a hypothesis to satisfy the gate either; that makes it a
+  ritual and it stops protecting anything.
 - The diff is recorded and shown to the user. An edit you cannot describe in
   one sentence in `why` is probably two edits.
 

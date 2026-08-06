@@ -700,6 +700,36 @@ def _row_shows_failure(row, expect):
     return expect.get("exit_zero") is False or expect.get("reproduces") is True
 
 
+def failing_hypotheses(limit=6):
+    """Which hypotheses HAVE been observed failing, most recent first.
+
+    A REFUSAL THAT MISDIAGNOSES IS WORSE THAN A SILENT ONE. `apply_edit` told
+    an assistant that had reproduced the defect four turns running to "reproduce
+    the defect before editing" — because the reproduction was on a DIFFERENT
+    hypothesis id than the edit cited, which is the one thing the message could
+    not say. It wrote a fifth reproduction. The gate was right to refuse and
+    wrong about why, and being wrong about why is what cost the turns.
+    """
+    seen, out = set(), []
+    for row in q("SELECT e.hypothesis_id AS hid, e.expect, e.outcome, "
+                 "e.observation, e.turn_idx, h.question FROM experiments e "
+                 "JOIN hypotheses h ON h.id = e.hypothesis_id "
+                 "ORDER BY e.id DESC") or []:
+        if row["hid"] in seen:
+            continue
+        try:
+            expect = json.loads(row["expect"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if _row_shows_failure(row, expect):
+            seen.add(row["hid"])
+            out.append({"id": row["hid"],
+                        "question": str(row["question"] or "")[:120]})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def observed_failing(hypothesis_id):
     """Has anything actually been seen to fail for this hypothesis?
 
@@ -859,10 +889,23 @@ def apply_edit(path, contents=None, *, turn_idx, replace=None,
     import workspace
 
     if hypothesis_id is not None and not observed_failing(hypothesis_id):
-        return {"ok": False, "path": str(path),
-                "why": "nothing has been observed failing for that "
-                       "hypothesis — reproduce the defect before editing the "
-                       "code that supposedly causes it",
+        # NAME THE IDS THAT WOULD OPEN IT. The bare refusal reads as "you did
+        # not reproduce it", which is false whenever the reproduction landed on
+        # a neighbouring id — and that is the common case, because the
+        # hypothesis an experiment opens in THIS turn does not exist yet when
+        # the edit citing it is composed.
+        others = [h for h in failing_hypotheses() if h["id"] != hypothesis_id]
+        why = ("nothing has been observed failing for hypothesis "
+               f"{hypothesis_id} — reproduce the defect before editing the "
+               "code that supposedly causes it")
+        if others:
+            named = "; ".join(f"{h['id']} ({h['question']})" for h in others)
+            why += (". These HAVE been observed failing, so if one of them is "
+                    f"the defect you reproduced, cite it instead: {named}. If "
+                    "the reproduction was an experiment in THIS turn, its id "
+                    "did not exist when you wrote this edit — omit "
+                    "`hypothesis_id` and set `fixes` instead")
+        return {"ok": False, "path": str(path), "why": why,
                 "gated_on": hypothesis_id}
     if replace:
         # Anchored mode reads the file itself, so the assistant never has to

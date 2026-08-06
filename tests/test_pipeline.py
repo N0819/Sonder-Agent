@@ -703,3 +703,64 @@ def test_a_turn_that_parses_records_no_failure_sample(temp_db):
     finally:
         providers.set_chat_stub(None)
     assert "unparseable" not in out["trace"]["payload_cost"]
+
+
+def test_a_defect_reproduced_and_fixed_in_one_turn_can_name_its_own_run(
+        temp_db, tmp_path):
+    """The id of THIS turn's reproduction does not exist when the edit citing
+    it is written — `open_hypothesis` mints it at stage 4a, after the model has
+    composed its response. The prompt promised otherwise ("run the experiment
+    that reproduces the defect in the same turn and it will be there"), and
+    four consecutive live turns reproduced a defect, cited the newest id they
+    could actually see — the previous turn's — and were refused. `fixes` is how
+    that promise is kept; it existed in the pipeline and was documented
+    nowhere, so nothing could reach it."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "db.py", b"def conn():\n    return None\n")
+
+    _stub(respond={
+        "reply": "Reproduced it, then guarded it.",
+        "experiment": [{"hypothesis": "does conn() skip the schema check?",
+                        "source": "print('GUARD_PRESENT=False')\n",
+                        "expect": {"exit_zero": True,
+                                   "stdout_has": "GUARD_PRESENT=False",
+                                   "reproduces": True}}],
+        "edit_files": [{"path": "db.py",
+                        "fixes": "does conn() skip the schema check?",
+                        "contents": "def conn():\n    check()\n",
+                        "why": "name the cause"}]})
+    out = pipeline.run_turn("guard it")
+
+    assert not [w for w in out["trace"]["warnings"] if "edit refused" in w], (
+        out["trace"]["warnings"])
+    assert workspace.read_file("db.py", 1)["text"] == "def conn():\n    check()\n"
+    assert "Not applied." not in out["reply"]
+
+
+def test_fixes_aims_at_the_run_that_failed_not_the_last_one(temp_db, tmp_path):
+    """A turn that reproduces a defect and then runs a baseline would aim the
+    gate at the run where nothing failed, and be refused for the reproduction
+    it did make. `fixes` names a defect, and the only runs that can answer for
+    one are the runs that observed it."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "db.py", b"old\n")
+
+    _stub(respond={
+        "reply": "Reproduced, then took a baseline.",
+        "experiment": [
+            {"hypothesis": "does the defect reproduce?",
+             "source": "print('BROKEN=True')\n",
+             "expect": {"exit_zero": True, "stdout_has": "BROKEN=True",
+                        "reproduces": True}},
+            {"hypothesis": "is the harness itself sound?",
+             "source": "print('ok')\n",
+             "expect": {"exit_zero": True, "stdout_has": "ok"}}],
+        "edit_files": [{"path": "db.py", "fixes": "does the defect reproduce?",
+                        "contents": "new\n", "why": "repair it"}]})
+    out = pipeline.run_turn("fix it")
+
+    assert not [w for w in out["trace"]["warnings"] if "edit refused" in w], (
+        out["trace"]["warnings"])
+    assert workspace.read_file("db.py", 1)["text"] == "new\n"
