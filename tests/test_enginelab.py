@@ -316,3 +316,19 @@ def test_destroying_a_lab_that_is_not_there_says_so(lab):
     enginelab.provision("one")
     assert enginelab.destroy("one")["ok"] is True
     assert enginelab.labs() == []
+
+
+def test_a_run_in_flight_is_visible_in_the_listing(lab, monkeypatch):
+    """RUNS OUTLIVE THE TURN THAT STARTED THEM — that is the whole point of
+    detaching. Without this the listing shows a lab that looks idle while a
+    turn is halfway through writing it, and the obvious next move, starting
+    another, is the one thing that makes the trace impossible to untangle.
+    """
+    enginelab.provision("one")
+    assert "running" not in enginelab.labs()[0]
+    runs_dir = os.path.join(enginelab._lab_dir("one"), "runs")
+    with open(os.path.join(runs_dir, "9999.pid"), "w") as fh:
+        fh.write(str(os.getpid()))  # a pid that is certainly alive
+    listed = enginelab.labs()[0]
+    assert listed["running"]["run"] == "9999"
+    assert listed["running"]["pid"] == os.getpid()

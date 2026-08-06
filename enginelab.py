@@ -479,7 +479,15 @@ def labs():
                     # so a lab with two detached turns in it reported zero —
                     # and "no turns yet" is the one reading that makes an
                     # assistant re-seed a story it has already played.
-                    "turns_played": _turns_in(db_path)})
+                    "turns_played": _turns_in(db_path),
+                    # A RUN IN FLIGHT IS THE STATE MOST WORTH SEEING HERE.
+                    # Runs are detached and outlive the turn that started
+                    # them, so without this the listing shows a lab that looks
+                    # idle while a turn is halfway through writing it — and
+                    # the obvious next move, starting another, is the one
+                    # thing that makes the trace impossible to untangle.
+                    **({"running": _running(name)}
+                       if _running(name) else {})})
     return out
 
 
