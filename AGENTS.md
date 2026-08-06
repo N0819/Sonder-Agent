@@ -26,6 +26,9 @@ because something broke.
 | how an agent navigates code | `codemap.py` | an index, never a summary |
 | delegating work | `subagents.py` | the grant ledger; `tests/test_subagents.py` |
 | what a subagent may touch | `subagents.py` | scope is enforced at validation, not in a prompt |
+| reading somebody else's database | `refdb.py` | the redaction is on the way OUT and applies to every lane above it |
+| debugging a story by name and turn | `storydb.py` | it must never pick among ambiguous names; `tests/test_storydb.py` |
+| running a test story | `enginelab.py` | always a subprocess; the key is copied by the child and never returned |
 | a mechanism you believe is live | anywhere | count it firing before you tune it; `tests/test_silent_mechanisms.py` |
 
 ## Invariants
@@ -182,6 +185,29 @@ test.
   to 20,000 characters *after* buffering the whole stream, so model-written
   code took the host process from 12 MB to 3,181 MB. Bound the read, not the
   result.
+- **Read-only says nothing about a read.** `SELECT name, api_key FROM
+  providers` through the reference lane returned two working keys verbatim,
+  and `settings` returned the host password hash and its salt. Everything a
+  fetch verb returns is written down — an evidence excerpt, a turn trace,
+  `assistant.db` — and this repository is public. A key does not have to be
+  published to be burned. Redaction is folded in at the one point every cell
+  passes through, never written as a rule about which tables not to ask for.
+- **A registry that lives only in the environment belongs to whoever started
+  the process.** `query_db` answered "no reference database named 'engine'" on
+  a server where it had worked an hour earlier, because the restart in between
+  did not carry `ASSISTANT_REFDB`. An empty registry reads exactly like an
+  install where nothing was ever configured. Configuration that must survive a
+  restart goes in the settings row, and what was stored beats a stale export.
+- **A gate that reads punctuation inside data is wrong in both directions.**
+  The single-statement check saw a semicolon inside a quoted story name and
+  refused a perfectly good SELECT as a batch; a `--` inside a literal made the
+  comment stripper eat the rest, so what got ANALYSED was not what would RUN.
+  Blank the literals before the checks read the copy.
+- **A NULL does not survive a trip through a renderer.** Every cell from the
+  query lane comes back as text, so a step with no active variant arrived as
+  the four-character string `"None"` and read as content — an agent that
+  stored nothing was indistinguishable from one that stored the word. Ask the
+  question in SQL, where the NULL still exists.
 
 ## Retiring memories
 

@@ -298,6 +298,57 @@ bank. Deep runs are archived because their working-out is the thing you want
 when a report turns out to be wrong — and the archive is inert, read by a
 human and never by recall.
 
+## Debugging somebody else's engine
+
+Three lanes, layered, each one refusing to be the layer below it.
+
+`refdb` is the door: one read-only statement at a time against a database too
+large to copy, with a row cap, a character cap, a wall-clock abort and — since
+it was measured handing back two working API keys and a password hash —
+credential redaction folded in at the one point every cell passes through. It
+is deliberately not a workspace. A reference database is evidence, and evidence
+is read.
+
+`storydb` is the resolution layer above it, and it exists because the SQL was
+never the hard part. A bug report arrives as "the Blizzard story went wrong
+around turn 40": a name a person remembers and a number counted off a screen.
+The chat is keyed by an integer nobody knows, turns are numbered per chat, and
+what the agents actually said is a join past that, so every investigation began
+by rediscovering the schema and the rediscovery cost more rounds than the
+defect. It reads through `refdb` rather than opening its own connection, so the
+caps and the redaction apply here for free and cannot be forgotten.
+
+It will not pick a story. Branches are named by suffixing the parent, so one
+remembered name is routinely a prefix of three real chats of different lengths,
+and the one a person means is not the one a `LIKE` ranks first. A silently
+chosen chat produces a theory that is internally consistent, checkable against
+real turns, and about a different story — and there is no later signal that
+catches it. Ambiguity comes back as a list.
+
+`enginelab` is the other end of the same investigation. Reading a broken story
+ends at a theory, and a theory about interactive fiction is cheap: these
+defects live in what agents do to each other's output across a turn, and the
+only instrument that settles one is another turn. A lab is a scratch database
+bootstrapped by the engine's own `db.init()` — never a second copy of the
+schema, which would drift — seeded with a story, and driven through the same
+`run_pipeline` the engine's own server uses, against the source tree in the
+workspace. So an edit becomes an observation, which is the one thing the
+coding suite's first rule requires and could not previously get for the engine.
+
+Always a subprocess: both projects have a top-level `db`, and importing the
+engine here would bind whichever came first and send every query to the wrong
+database, silently, because the statements are similar enough to run.
+
+The credentials go in and do not come back. A lab needs a real key to reach a
+model, so the child copies the provider rows and returns a count; the parent
+never holds the string, so it cannot reach a return value, a trace, or the
+public repository. Reading the lab back goes through `refdb`, which redacts the
+same columns. Two doors, one rule, neither relying on being remembered.
+
+Runs are detached, because a turn is a dozen model calls and minutes of wall
+clock. The lab is on disk, so a run started in one turn is read in the next —
+the same shape as an experiment, deliberately.
+
 ## Known simplifications (recorded, not hidden)
 
 - Retirement has no explicit "project" or "iteration" entity: the grouping is
