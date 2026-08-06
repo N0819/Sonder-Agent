@@ -804,7 +804,15 @@ def test_an_experiment_can_attach_to_a_hypothesis_already_open(temp_db,
     """Without this, `open_hypothesis` mints a fresh id from each run's own
     text and no two runs ever share one — which is why three mechanisms sat at
     zero fires against zero opportunities. The id is the only lever that says
-    two differently-worded probes measure one claim."""
+    two differently-worded probes measure one claim.
+
+    A DISPUTE NEEDS TWO ROWS ON ONE HYPOTHESIS. Measured over the bank when
+    this landed: 141 of 148 hypotheses carried exactly one experiment plus the
+    evidence it generated — each moved once and never again, so no two could
+    ever contradict each other. (The assistant's own measurement, from a test
+    it wrote for this in its copy of the tree; I lost that file to a careless
+    sync and recovered the reasoning from the chunk index. The ratio drifts as
+    the bank grows — it is the shape that matters, not the number.)"""
     import research
     import workspace
     workspace.configure(str(tmp_path / "workspaces"))
@@ -828,7 +836,12 @@ def test_an_experiment_naming_an_unknown_hypothesis_says_so(temp_db, tmp_path):
     """A guessed integer is the ritual the gate discipline exists to prevent,
     and an attached run is where a wrong id is invisible afterwards — a
     misfiled row reads exactly like a correct one. Falling back silently would
-    make the guess look honoured."""
+    make the guess look honoured.
+
+    THE FALLBACK IS ANNOUNCED, and the announcement is the whole test: an
+    unrecognised id has to behave exactly as every experiment did before the
+    option existed, because from outside, an ignored id reads like an
+    attachment that worked."""
     import workspace
     workspace.configure(str(tmp_path / "workspaces"))
     _stub(respond={"reply": "x",
