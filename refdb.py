@@ -31,6 +31,49 @@ MAX_CHARS = 20000
 MAX_CELL_CHARS = 2000
 TIME_LIMIT_S = 5.0
 
+# A REFERENCE DATABASE IS SOMEBODY ELSE'S DATABASE, and it holds their
+# credentials. `SELECT name, api_key FROM providers` against the engine
+# returned two live keys verbatim — measured, not supposed — and `SELECT * FROM
+# settings` returned the host password hash and its salt. Read-only stops a
+# write; it does nothing about a read, and a read is the whole problem here.
+#
+# What made it worth fixing rather than documenting: everything this lane
+# returns is written down. It lands in an evidence excerpt, in the turn trace,
+# in `assistant.db` — and this repository is public. A key does not have to be
+# published to be burned; it only has to be recorded somewhere it was never
+# meant to be, by a process nobody remembers reading.
+#
+# So it is folded on the way OUT, at the one point every cell passes through,
+# rather than written as a rule about which tables not to ask for. A rule that
+# must be remembered will be forgotten — and here it would have to be
+# remembered by a model that has every reason to go looking at settings when it
+# is debugging a settings-shaped defect.
+
+# The COLUMN NAME says it is a credential. `_hash`/`_salt` are deliberately
+# only matched next to a password or secret: a bare `_hash` column is usually a
+# content digest, and digests are load-bearing evidence in this repository.
+_SECRET_NAME = re.compile(
+    r"(^|_)(api_?key|apikey|secret|password|passwd|token|credential|"
+    r"private_key|access_key|refresh_token)(_|$)"
+    r"|(^|_)(pw|password|passwd|secret)_(hash|salt)(_|$)", re.I)
+
+# The ROW KEY says it, in a key/value table like `settings`, where the column
+# is called `value` and carries no information at all. `_key$` lives here and
+# not above on purpose: as a row key it catches `freesound_key`, whereas as a
+# column name it would catch the `key` column itself — which holds names.
+_SECRET_ROW_KEY = re.compile(
+    r"(^|_)(api_?key|apikey|secret|password|passwd|token|credential)(_|$)"
+    r"|_key$|_hash$|_salt$", re.I)
+
+# The VALUE announces itself. The backstop for a credential in a column nobody
+# thought to name suggestively — a key pasted into a notes field is still a key.
+_SECRET_VALUE = re.compile(
+    r"^(sk-|sk_live|pk_live|ghp_|gho_|ghu_|ghs_|github_pat_|xox[baprs]-|"
+    r"AKIA|ASIA|AIza|glpat-|hf_|-----BEGIN)")
+
+# Which column holds the row key, when the table is key/value shaped.
+_KEY_COLUMNS = ("key", "name", "setting", "option")
+
 # One careless scan of a 699 MiB table holds the turn open for minutes, and the
 # assistant cannot know a table's size before it asks. The handler fires every
 # _PROGRESS_OPS virtual-machine instructions and aborts on wall clock, so a bad
@@ -84,9 +127,42 @@ def databases():
     return out
 
 
+def _blank_strings(sql):
+    """Replace every quoted literal with an empty one, for analysis only.
+
+    THE GATE WAS READING PUNCTUATION INSIDE DATA. A story named
+    "O'Brien; the sequel" composes a perfectly good single SELECT, and the
+    checks below saw the semicolon in the literal and refused it as a batch —
+    with a message about batching, which is not what happened. The same
+    mistake in the other direction is worse: `--` inside a literal made the
+    comment stripper eat the rest of the statement, so what got analysed was
+    not what would run.
+
+    The executed SQL is untouched; only the copy the checks read is stripped.
+    """
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in "'\"":
+            out.append(ch + ch)
+            i += 1
+            while i < n:
+                if sql[i] == ch:
+                    if i + 1 < n and sql[i + 1] == ch:  # doubled = escaped
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def _statement_problem(sql):
     """Why this is not a single read-only statement, or "" if it is."""
-    text = re.sub(r"--[^\n]*", " ", str(sql or ""))
+    text = re.sub(r"--[^\n]*", " ", _blank_strings(str(sql or "")))
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S).strip()
     if not text:
         return "no query was given"
@@ -102,18 +178,54 @@ def _statement_problem(sql):
     return ""
 
 
-def _render(value):
+def _render(value, limit=MAX_CELL_CHARS):
     if isinstance(value, (bytes, bytearray)):
         return f"<{len(value)} bytes blob>"
     text = str(value)
-    if len(text) > MAX_CELL_CHARS:
-        return (text[:MAX_CELL_CHARS]
-                + f"… [cell truncated, {len(text)} chars total]")
+    if len(text) > limit:
+        return text[:limit] + f"… [cell truncated, {len(text)} chars total]"
     return text
 
 
+def _redact_row(columns, rendered):
+    """Blank the credentials in one already-rendered row.
+
+    Returns `(row, redacted_columns)`. THE REPLACEMENT NAMES WHAT IT ATE. A
+    silently emptied cell reads as a NULL in the source table, which is a
+    finding — and a wrong one. `<redacted: api_key>` cannot be misread as data,
+    and it still tells the reader the column exists and is populated, which is
+    usually all the debugging actually needed.
+    """
+    hit = []
+    row_key = ""
+    for i, col in enumerate(columns):
+        if str(col).lower() in _KEY_COLUMNS and i < len(rendered):
+            row_key = rendered[i]
+            break
+    for i, col in enumerate(columns):
+        if i >= len(rendered):
+            break
+        value = rendered[i]
+        if not value:
+            # Nothing to leak, and blanking an empty cell would claim a secret
+            # is there. `host_secret` is empty in the engine right now.
+            continue
+        why = ""
+        if _SECRET_NAME.search(str(col)):
+            why = str(col)
+        elif row_key and str(col).lower() not in _KEY_COLUMNS \
+                and _SECRET_ROW_KEY.search(row_key):
+            why = row_key
+        elif _SECRET_VALUE.match(value):
+            why = "credential-shaped value"
+        if why:
+            rendered[i] = f"<redacted: {why[:60]}, {len(value)} chars>"
+            hit.append(str(col))
+    return rendered, hit
+
+
 def query(name, sql, max_rows=MAX_ROWS, max_chars=MAX_CHARS,
-          time_limit=TIME_LIMIT_S):
+          time_limit=TIME_LIMIT_S, max_cell=MAX_CELL_CHARS):
     """Run one read-only statement and return rows, or an explicit failure.
 
     Returns {"ok", "columns", "rows", "row_count", "truncated", "why"} — or
@@ -153,12 +265,15 @@ def query(name, sql, max_rows=MAX_ROWS, max_chars=MAX_CHARS,
         cur = conn.execute(str(sql))
         columns = [d[0] for d in (cur.description or [])]
         rows, chars, truncated, why = [], 0, False, ""
+        redacted = set()
         for raw in cur:
             if len(rows) >= max_rows:
                 truncated = True
                 why = f"stopped at the {max_rows}-row cap"
                 break
-            rendered = [_render(v) for v in raw]
+            rendered = [_render(v, max_cell) for v in raw]
+            rendered, hit = _redact_row(columns, rendered)
+            redacted.update(hit)
             size = sum(len(c) for c in rendered)
             if chars + size > max_chars and rows:
                 truncated = True
@@ -167,7 +282,12 @@ def query(name, sql, max_rows=MAX_ROWS, max_chars=MAX_CHARS,
             rows.append(rendered)
             chars += size
         return {"ok": True, "columns": columns, "rows": rows,
-                "row_count": len(rows), "truncated": truncated, "why": why}
+                "row_count": len(rows), "truncated": truncated, "why": why,
+                # SAID, not silent — for the same reason `truncated` is said.
+                # An assistant reading a redacted key needs to know the lane
+                # took it, or it will conclude the column is empty and go on
+                # to explain a defect with that as a premise.
+                "redacted": sorted(redacted)}
     except sqlite3.OperationalError as exc:
         # The progress handler aborts with "interrupted"; say what that MEANT,
         # because "interrupted" reads as a harness fault rather than as the

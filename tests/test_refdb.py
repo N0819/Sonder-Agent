@@ -139,3 +139,124 @@ def test_a_registered_database_whose_file_vanished_looks_absent(tmp_path):
         assert not out["ok"] and "not there" in out["error"]
     finally:
         refdb.configure({})
+
+
+@pytest.fixture
+def creds(tmp_path):
+    """A reference database shaped like the engine's: credentials in it."""
+    path = tmp_path / "withkeys.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE providers(id INTEGER PRIMARY KEY, name TEXT, "
+                 "base_url TEXT, api_key TEXT, enabled INTEGER)")
+    conn.execute("INSERT INTO providers(name,base_url,api_key,enabled) "
+                 "VALUES('nanogpt','https://example.invalid/v1',"
+                 "'sk-nano-EXAMPLE-NOT-A-REAL-KEY-0000000',1)")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)")
+    conn.executemany("INSERT INTO settings(key,value) VALUES(?,?)", [
+        ("host_pw_hash", "a" * 64), ("host_pw_salt", "b" * 32),
+        ("host_secret", ""), ("host_username", "Nathan"),
+        ("freesound_key", "c" * 40), ("max_output_tokens", "40000"),
+        ("agent_models", '{"director": "some/model"}')])
+    conn.execute("CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO notes(body) VALUES('sk-or-v1-" + "d" * 40 + "')")
+    conn.commit()
+    conn.close()
+    refdb.configure({"engine": str(path)})
+    yield path
+    refdb.configure({})
+
+
+def test_an_api_key_does_not_come_back_through_the_query_lane(creds):
+    """MEASURED, NOT SUPPOSED: `SELECT name, api_key FROM providers` against
+    the live engine returned two working keys verbatim, and `mode=ro` had
+    nothing to say about it because a read is the whole problem. Everything
+    this lane returns is written down — an evidence excerpt, a turn trace,
+    `assistant.db` — and this repository is public.
+    """
+    result = refdb.query("engine", "SELECT name, api_key FROM providers")
+    assert result["ok"]
+    assert "sk-nano-EXAMPLE-NOT-A-REAL-KEY-0000000" not in str(result)
+    assert result["rows"][0][0] == "nanogpt"
+    assert result["rows"][0][1].startswith("<redacted:")
+    assert "api_key" in result["redacted"]
+
+
+def test_a_password_hash_in_a_key_value_table_is_redacted_too(creds):
+    """The column is called `value` and says nothing about what is in it. A
+    redactor that only read column names would have passed the host password
+    hash and its salt straight through, which is how `SELECT * FROM settings`
+    was returning them.
+    """
+    result = refdb.query("engine", "SELECT key, value FROM settings")
+    got = dict(result["rows"])
+    assert got["host_pw_hash"].startswith("<redacted:")
+    assert got["host_pw_salt"].startswith("<redacted:")
+    assert got["freesound_key"].startswith("<redacted:")
+    assert "a" * 64 not in str(result)
+
+
+def test_redaction_does_not_eat_the_settings_worth_debugging(creds):
+    """AN OVER-BROAD REDACTOR IS A BROKEN LANE. Model configuration is the
+    most common reason to read `settings` at all, and a username is not a
+    credential. If those disappear the guard has cost more than it saved.
+    """
+    result = refdb.query("engine", "SELECT key, value FROM settings")
+    got = dict(result["rows"])
+    assert got["max_output_tokens"] == "40000"
+    assert got["agent_models"] == '{"director": "some/model"}'
+    assert got["host_username"] == "Nathan"
+    assert got["host_secret"] == ""
+
+
+def test_a_credential_pasted_into_an_innocent_column_is_still_caught(creds):
+    """Neither the column name nor the row key says anything here. A key is a
+    key wherever it was put, and the shape of one is the last backstop.
+    """
+    result = refdb.query("engine", "SELECT body FROM notes")
+    assert result["rows"][0][0].startswith("<redacted:")
+    assert "sk-or-v1-" not in str(result["rows"])
+
+
+def test_the_lane_says_what_it_redacted(creds):
+    """SAID, NOT SILENT — the same rule as `truncated`. A blanked cell reads
+    as a NULL in the source table, which is a finding, and a wrong one: an
+    assistant would go on to explain a defect with "the key is unset" as its
+    premise.
+    """
+    quiet = refdb.query("engine", "SELECT key FROM settings")
+    assert quiet["redacted"] == []
+    loud = refdb.query("engine", "SELECT name, api_key FROM providers")
+    assert loud["redacted"] == ["api_key"]
+    assert "44 chars" in loud["rows"][0][1] or "chars" in loud["rows"][0][1]
+
+
+def test_a_semicolon_inside_a_story_name_is_not_a_second_statement(ref):
+    """THE GATE WAS READING PUNCTUATION INSIDE DATA. A story named
+    "O'Brien; the sequel" composes one perfectly good SELECT, and the batch
+    check saw the semicolon in the literal and refused it — reporting a batch,
+    which is not what had happened.
+    """
+    result = refdb.query(
+        "engine", "SELECT COUNT(*) FROM turns WHERE body = 'O''Brien; two'")
+    assert result["ok"], result.get("error")
+    assert result["rows"][0][0] == "0"
+
+
+def test_a_comment_marker_inside_a_literal_does_not_eat_the_statement(ref):
+    """Worse than a false refusal: the comment stripper ran before quoting was
+    considered, so what got ANALYSED was a truncated statement while what would
+    RUN was the whole one. The gate and the executor were reading different SQL.
+    """
+    result = refdb.query(
+        "engine", "SELECT body FROM turns WHERE body = 'a -- b' LIMIT 1")
+    assert result["ok"], result.get("error")
+
+
+def test_a_real_second_statement_is_still_refused(ref):
+    """The control. Teaching the gate about quoting must not teach it to let a
+    genuine batch through — only the last result would come back, so a batch
+    cannot be graded.
+    """
+    result = refdb.query("engine", "SELECT 1; SELECT 2")
+    assert result["ok"] is False and "one statement" in result["error"]
+    assert refdb.query("engine", "DELETE FROM turns")["ok"] is False
