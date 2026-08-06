@@ -332,3 +332,29 @@ def test_a_run_in_flight_is_visible_in_the_listing(lab, monkeypatch):
     listed = enginelab.labs()[0]
     assert listed["running"]["run"] == "9999"
     assert listed["running"]["pid"] == os.getpid()
+
+
+def test_a_reroll_needs_one_kind_of_rerun_not_both(lab):
+    """`from_key` recomputes the tail; `only_key` recomputes one step and
+    leaves the tail stale. They end in different states, so a call naming both
+    has not said which experiment it is running.
+    """
+    enginelab.provision("one")
+    enginelab.seed("one", {"scenario": "The lamp room.",
+                           "characters": [{"name": "Maren Holt"}]})
+    bad = enginelab.reroll("one", 0, from_key="narrator", only_key="narrator")
+    assert bad["ok"] is False and "Pick one" in bad["error"]
+
+
+def test_a_reroll_of_a_turn_that_was_never_played_says_so(lab):
+    """Otherwise the failure lands inside the engine as a null turn id, which
+    reads as a pipeline defect rather than as a wrong turn number.
+    """
+    enginelab.provision("one")
+    enginelab.seed("one", {"scenario": "The lamp room.",
+                           "characters": [{"name": "Maren Holt"}]})
+    result = enginelab.reroll("one", 7, only_key="narrator", wait=True,
+                              timeout=60)
+    assert result["ok"] is False
+    assert "no turn with idx 7" in (result.get("error") or "") + \
+        (result.get("traceback") or "")

@@ -353,6 +353,9 @@ def _lab_lane(spec):
         "seed": lambda s: enginelab.seed(name, s.get("story")),
         "play": lambda s: enginelab.play(
             name, s.get("text") or "", chat_id=s.get("chat_id")),
+        "reroll": lambda s: enginelab.reroll(
+            name, s.get("turn"), from_key=s.get("from_key"),
+            only_key=s.get("only_key"), chat_id=s.get("chat_id")),
         "runs": lambda s: enginelab.runs(name, s.get("run")),
         "stop": lambda s: enginelab.stop(name),
         "query": lambda s: enginelab.lab_query(name, s.get("sql")),

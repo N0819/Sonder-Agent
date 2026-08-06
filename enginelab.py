@@ -433,6 +433,72 @@ print("''' + SENTINEL + ''' " + json.dumps(out))
 '''
 
 
+_REROLL = '''\
+import json, os, sys, time
+A = json.load(open(sys.argv[1]))
+os.environ["ENGINE_DB"] = A["db"]
+sys.path.insert(0, A["source"])
+out = {"ok": False}
+t0 = time.time()
+try:
+    import db
+    db.configure(A["db"])
+    from db import q
+    CID = A["chat_id"]
+    # THE CHEAP CHECK FIRST. Importing the pipeline before looking the turn up
+    # meant a wrong turn number surfaced as whatever the import happened to
+    # fail on, several layers away from the thing that was actually wrong.
+    row = q("SELECT id FROM turns WHERE chat_id=? AND idx=?",
+            (CID, A["turn_idx"]), one=True)
+    if row is None:
+        raise ValueError("chat %s has no turn with idx %s"
+                         % (CID, A["turn_idx"]))
+    tid = row["id"]
+    from agents.runtime import run_pipeline
+    before = [{"key": s["key"], "ord": s["ord"], "stale": bool(s["stale"]),
+               "variants": (q("SELECT COUNT(*) AS n FROM variants "
+                              "WHERE step_id=?", (s["id"],), one=True)
+                            or {"n": 0})["n"]}
+              for s in q("SELECT id,key,ord,stale FROM steps WHERE turn_id=? "
+                         "ORDER BY ord", (tid,)) or []]
+    err = None
+    try:
+        for _ in run_pipeline(CID, tid, from_key=A.get("from_key"),
+                              only_key=A.get("only_key")):
+            pass
+    except Exception as exc:
+        import traceback
+        err = "%s: %s" % (type(exc).__name__, exc)
+        out["traceback"] = traceback.format_exc()[-3000:]
+    after = [{"key": s["key"], "ord": s["ord"], "stale": bool(s["stale"]),
+              "variants": (q("SELECT COUNT(*) AS n FROM variants "
+                             "WHERE step_id=?", (s["id"],), one=True)
+                           or {"n": 0})["n"]}
+             for s in q("SELECT id,key,ord,stale FROM steps WHERE turn_id=? "
+                        "ORDER BY ord", (tid,)) or []]
+    resume = None
+    try:
+        from agents.runtime import resume_key_for_turn
+        resume = resume_key_for_turn(tid, CID)
+    except Exception:
+        # Reporting the resume point is a convenience; failing to get it must
+        # not turn a successful reroll into a failed run.
+        resume = None
+    out.update({"ok": err is None, "chat_id": CID, "idx": A["turn_idx"],
+                "turn_row_id": tid, "seconds": round(time.time() - t0, 1),
+                "from_key": A.get("from_key"), "only_key": A.get("only_key"),
+                "error": err, "before": before, "after": after,
+                "resume_key": resume,
+                "stale_after": [s["key"] for s in after if s["stale"]]})
+except Exception as exc:
+    import traceback
+    out = {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc),
+           "traceback": traceback.format_exc()[-2000:],
+           "seconds": round(time.time() - t0, 1)}
+print("''' + SENTINEL + ''' " + json.dumps(out))
+'''
+
+
 # --------------------------------------------------------------------------
 # The lane.
 # --------------------------------------------------------------------------
@@ -596,6 +662,46 @@ def play(name, text="", chat_id=None, source=None, wait=False, timeout=2400):
         result["note"] = ("started, not finished. Poll with runs(); a turn is "
                           "typically minutes.")
     return result
+
+
+def reroll(name, turn_idx, from_key=None, only_key=None, chat_id=None,
+           source=None, wait=False, timeout=2400):
+    """Recompute part of a turn that has already been played.
+
+    THIS IS HOW A STALE STEP IS REPRODUCED. The engine marks every step after
+    a recomputed one stale BEFORE the work begins, deliberately, so that an
+    interrupted rerun leaves an honest breadcrumb instead of downstream content
+    that goes on looking fresh. `only_key` recomputes exactly one step, which
+    means the whole downstream tail is marked and never recomputed — the same
+    end state an abandoned rerun leaves, for the cost of a single model call
+    rather than a whole turn.
+
+    Reports the step table before and after, so the change is the evidence
+    rather than something to be re-derived from a later query.
+    """
+    lab = _lab_dir(name)
+    db_path = os.path.join(lab, "run.db")
+    if not os.path.isfile(db_path):
+        return {"ok": False, "error": f"lab {name!r} is not provisioned yet"}
+    meta = _meta(name)
+    cid = chat_id if chat_id is not None else meta.get("chat_id")
+    if cid is None:
+        return {"ok": False, "error": f"lab {name!r} has no story in it"}
+    if from_key and only_key:
+        return {"ok": False, "error": "from_key and only_key are different "
+                                      "reruns — from_key recomputes the tail, "
+                                      "only_key recomputes one step and leaves "
+                                      "the tail stale. Pick one"}
+    active = _running(name)
+    if active:
+        return {"ok": False, "error": f"run {active['run']} is still going "
+                                      f"(pid {active['pid']}) — one at a time "
+                                      f"per lab", "running": active}
+    return _run_child(name, _REROLL,
+                      {"db": db_path, "source": _source_for(name, source),
+                       "chat_id": cid, "turn_idx": turn_idx,
+                       "from_key": from_key, "only_key": only_key},
+                      timeout=timeout, detach=not wait, label="reroll")
 
 
 def _running(name):

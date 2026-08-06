@@ -460,6 +460,14 @@ something you do not have in front of you:
       "lab": "lamp"}}`, which reports `running`, `done` or `failed` — a run
       that is `failed` carries the tail of the log, which is where the
       traceback is.
+    * `{{"verb": "reroll", "lab": "lamp", "turn": 2, "only_key": "narrator"}}`
+      recomputes part of a turn already played — `only_key` for exactly one
+      step, `from_key` for that step and everything after it. THIS IS HOW A
+      STALE STEP IS REPRODUCED: the engine marks every step after a recomputed
+      one stale before the work begins, so `only_key` leaves the whole
+      downstream tail marked and never recomputed — the same end state an
+      abandoned rerun leaves, for one model call instead of a whole turn. It
+      reports the step table before and after, so the change is the evidence.
     * `{{"verb": "query", "lab": "lamp", "sql": "..."}}` reads the lab's own
       database — same statement gate, same caps as `query_db`. This is how you
       read the trace of a turn you just ran.
