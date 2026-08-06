@@ -24,7 +24,7 @@ import turnrun
 import workspace
 from db import q, state_get
 
-app = FastAPI(title="Sonder Assistant")
+app = FastAPI(title="Ponder Engine")
 
 
 # A chat message becomes an episode row, an FTS document, and an embedding

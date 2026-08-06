@@ -1,4 +1,4 @@
-# Sonder Assistant — run and test targets. Mirrors the engine's Makefile
+# Ponder Engine — run and test targets. Mirrors the engine's Makefile
 # discipline: `make test` is the full tier and is cheap enough to run freely;
 # there is no "fast" tier to hide behind at this size.
 

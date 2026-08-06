@@ -1,4 +1,4 @@
-# db.py — SQLite access and schema for Sonder Assistant.
+# db.py — SQLite access and schema for Ponder Engine.
 #
 # Inherited from Sonder Engine's db.py in shape: tiny q/qi/transaction helpers
 # over one sqlite3 connection per thread, WAL mode, a meta table carrying a

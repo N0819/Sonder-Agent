@@ -1,12 +1,17 @@
-# Sonder Assistant
+# Ponder Engine
 
 **Version 1.0** — 22 modules, 437 tests, offline suite.
+Released as **Sonder Assistant**; renamed, same project.
 
 A single-user chatbot with an assistant persona, real long-term memory, and
 evidence-driven research over the web. It is the cognition core of
 [Sonder Engine](../Sonder_Engine) — a multi-agent interactive-fiction system —
 extracted into a standalone project, with the fiction and the body removed
 and the epistemics kept.
+
+The name is the engine's, one letter over, and it is also a verb this system
+already had: `need_more.ponder` is how a turn asks its own memory instead of
+the world. Pondering is the half that was kept.
 
 ```bash
 make test   # full suite, offline, no network, no model
