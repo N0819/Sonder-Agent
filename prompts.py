@@ -199,6 +199,14 @@ carry real risk of being wrong:
   exit_zero true/false · exit_code 2 · stdout_has · stdout_lacks ·
   stdout_matches (regex) · stderr_has · stderr_lacks · output_equals ·
   file_contains {{"out.txt": "..."}} · file_lacks · file_equals
+`reproduces: true` is a DECLARATION rather than a check, and it is how a
+reproduction opens the reproduce-before-you-fix gate. A probe that CATCHES the
+defect and prints it — `ERRTYPE=... FILE_LEFT=True`, exit 0 — is better
+evidence than one that dies of it, but it grades CONFIRMED, and a confirmation
+used to mean nothing failed. Declare `reproduces` when the run is designed to
+demonstrate the broken behaviour, and the confirmation counts as having seen
+it fail. Declared before the run like everything else in `expect`, so it
+cannot be added once you know the answer.
 The file predicates read files THE RUN LEFT BEHIND, so "the patch applied and
 the file now reads X" is checkable directly instead of via a print statement.
 A prediction about a file the run never wrote is inconclusive, not refuted.

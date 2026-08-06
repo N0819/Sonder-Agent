@@ -1028,6 +1028,38 @@ def test_the_workspace_root_stays_importable_from_a_subdirectory(temp_db):
     assert "OK at-the-root" in out["stdout"]
 
 
+def test_a_probe_that_catches_the_defect_opens_the_gate(temp_db):
+    """The gate asked whether the RUN failed; a reproduction is about whether
+    the SUBJECT did. A probe that catches the exception and reports it —
+    `ERRTYPE=OperationalError NAMES_CAUSE=False FILE_LEFT=True`, exit 0 — is
+    better evidence than one that dies of it, and it grades CONFIRMED, so the
+    gate stayed shut. Observed twice in consecutive turns on one repair that
+    had a textbook reproduction on file and could not spend it."""
+    hyp = research.open_hypothesis("does the query leave a file?", turn_idx=1)
+    out = coding.run_experiment(
+        hyp["id"],
+        source=("try:\n    raise ValueError('boom')\n"
+                "except ValueError as e:\n    print('ERRTYPE=%s' % type(e).__name__)\n"),
+        expect={"exit_zero": True, "stdout_has": "ERRTYPE=ValueError",
+                "reproduces": True}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+    assert coding.observed_failing(hyp["id"]), "a caught defect is not a defect"
+    assert coding.propose_fix(hyp["id"], description="name the cause",
+                              turn_idx=1)["accepted"]
+
+
+def test_declaring_reproduces_is_not_itself_a_prediction(temp_db):
+    """`reproduces` is a declaration, not a check. If it counted as a stated
+    prediction, a run could open the gate while predicting nothing at all —
+    which is the ritual the gate exists to prevent, wearing its own badge."""
+    hyp = research.open_hypothesis("nothing predicted", turn_idx=1)
+    out = coding.run_experiment(hyp["id"], source="print('hi')\n",
+                                expect={"reproduces": True}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_INCONCLUSIVE, out
+    assert "no prediction" in out["why"]
+    assert not coding.observed_failing(hyp["id"])
+
+
 def test_a_program_we_relocated_can_import_from_where_it_runs(temp_db):
     """The other half of the contract. When `source` is given with `cwd`, the
     program is written to a path the caller did not choose — the payload root

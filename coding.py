@@ -252,6 +252,11 @@ def judge(result, expect):
         file_contains  {path: substring}   in a file the run left behind
         file_lacks     {path: substring}
         file_equals    {path: exact stripped contents}
+        reproduces     True — a DECLARATION, not a predicate: this run
+                       demonstrates the defect rather than suffering it, so a
+                       CONFIRMED grade counts as an observed failure and opens
+                       the reproduce-before-you-fix gate. `judge` ignores it,
+                       so declaring it alone is still "no prediction stated".
 
     THE VOCABULARY IS THE CEILING ON WHAT CAN BE INVESTIGATED. Every claim an
     experiment can ever make has to be expressible here, and with five keys
@@ -664,6 +669,37 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
             "shadowed": shadowed}
 
 
+def _row_shows_failure(row, expect):
+    """Did this experiment observe a failure of the thing under test?
+
+    ONE SPELLING, because there were two: `observed_failing` and
+    `_failing_since` carried this predicate independently, so a branch added
+    to one would silently not apply to the other — the gate and the
+    still-failing check disagreeing about what a reproduction is.
+
+    A PROBE THAT CATCHES THE DEFECT IS A BETTER REPRODUCTION THAN ONE THAT
+    DIES OF IT, and only the second used to count. The first two clauses ask
+    whether the RUN failed; a reproduction is about whether the SUBJECT did.
+    Catch the exception, print `ERRTYPE=OperationalError NAMES_CAUSE=False
+    FILE_LEFT=True FILE_SIZE=4096`, exit 0 — structured evidence instead of a
+    traceback, graded CONFIRMED because the prediction held — and the gate
+    stayed shut. Observed twice in consecutive turns on one repair that had a
+    textbook reproduction on file and could not spend it.
+
+    `reproduces` is a DECLARATION, written into `expect` before the run like
+    every other clause there, and that is what keeps it honest: it says "a
+    confirmation here is an observed failure of the thing under test". It is
+    not a predicate, `judge` ignores it, and declaring it alone still grades
+    inconclusive — a declaration is not a prediction.
+    """
+    # "Refuted" means THE PREDICTION WAS WRONG, not that anything failed.
+    if row["outcome"] == OUTCOME_REFUTED and _observation_failed(row):
+        return True
+    if row["outcome"] != OUTCOME_CONFIRMED:
+        return False
+    return expect.get("exit_zero") is False or expect.get("reproduces") is True
+
+
 def observed_failing(hypothesis_id):
     """Has anything actually been seen to fail for this hypothesis?
 
@@ -685,10 +721,7 @@ def observed_failing(hypothesis_id):
         # ok=True, outcome refuted — and propose_fix returned
         # "a failing observation exists" for a run in which nothing failed.
         # A reproduction has to carry an actual failure signal.
-        if row["outcome"] == OUTCOME_REFUTED and _observation_failed(row):
-            return True
-        if (row["outcome"] == OUTCOME_CONFIRMED
-                and expect.get("exit_zero") is False):
+        if _row_shows_failure(row, expect):
             return True
     return False
 
@@ -758,10 +791,7 @@ def _failing_since(hypothesis_id, row_id):
             expect = json.loads(row["expect"] or "{}")
         except (TypeError, ValueError):
             continue
-        if row["outcome"] == OUTCOME_REFUTED and _observation_failed(row):
-            return True
-        if (row["outcome"] == OUTCOME_CONFIRMED
-                and expect.get("exit_zero") is False):
+        if _row_shows_failure(row, expect):
             return True
     return False
 
