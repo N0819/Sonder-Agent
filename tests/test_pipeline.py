@@ -764,3 +764,35 @@ def test_fixes_aims_at_the_run_that_failed_not_the_last_one(temp_db, tmp_path):
     assert not [w for w in out["trace"]["warnings"] if "edit refused" in w], (
         out["trace"]["warnings"])
     assert workspace.read_file("db.py", 1)["text"] == "new\n"
+
+
+def test_the_trace_says_whether_an_edit_was_gated_at_all(temp_db, tmp_path):
+    """An edit that names no hypothesis takes the one path the reproduce-
+    before-you-fix gate does not check, and in the trace it was indistinguish-
+    able from one that satisfied it. `apply_edit` reports which happened and
+    its docstring promises the gate "cannot be silently skipped"; the pipeline
+    dropped the field that said so. Reviewing a live turn whose edit landed,
+    the record could not answer whether the gate had run."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "notes.md", b"before\n")
+    workspace.store_upload(1, "db.py", b"old\n")
+
+    _stub(respond={
+        "reply": "Both done.",
+        "experiment": [{"hypothesis": "does it reproduce?",
+                        "source": "print('BROKEN=True')\n",
+                        "expect": {"exit_zero": True, "stdout_has": "BROKEN=True",
+                                   "reproduces": True}}],
+        "edit_files": [
+            {"path": "db.py", "fixes": "does it reproduce?",
+             "contents": "new\n", "why": "repair"},
+            {"path": "notes.md", "contents": "after\n", "why": "asked for it"}]})
+    out = pipeline.run_turn("fix it and write the note")
+
+    by_path = {e["path"]: e for e in out["trace"]["edits"]}
+    assert by_path["db.py"]["gated_on"] is not None
+    assert "failing observation" in by_path["db.py"]["gate"]
+    # The unchecked path is named as such rather than looking like the other.
+    assert by_path["notes.md"]["gated_on"] is None
+    assert "no reproduction required" in by_path["notes.md"]["gate"]

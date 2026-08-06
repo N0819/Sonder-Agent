@@ -1006,8 +1006,19 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             continue
         run.emit("edit", state="applied", path=done["path"],
                  created=done["created"], rechunked=done["rechunked"])
+        # WHICH GATE VERDICT, not only that the write happened. `apply_edit`
+        # says whether a fix was justified by an observed failure or whether
+        # the edit claimed to be no repair at all — the third path, which the
+        # gate does not check. Its docstring promises "what the gate cannot be
+        # is silently skipped, so the return value always says which of the
+        # two happened", and this line dropped exactly that field: an edit
+        # that took the unchecked path and one that satisfied the gate were
+        # identical in the record. Reviewing a live turn, the trace could not
+        # answer whether a repair had been gated at all.
         edits.append({k: done[k] for k in
-                      ("path", "diff", "created", "unchanged", "rechunked")})
+                      ("path", "diff", "created", "unchanged", "rechunked")}
+                     | {"gated_on": done.get("gated_on"),
+                        "gate": done.get("why")})
     if edits:
         # The DIFF goes in the trace, not a line count. An edit reported as
         # "wrote 812 lines" is unreviewable — the reader has to hold both
