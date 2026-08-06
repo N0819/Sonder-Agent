@@ -171,6 +171,31 @@ def evidence_tally(hid):
         "GROUP BY stance", (hid,))}
 
 
+def latest_evidence(hid, limit=2):
+    """The newest evidence behind a hypothesis, with what it actually said.
+
+    A TALLY IS NOT A RESULT. `evidence_tally` answers "how many rows of each
+    stance", and the payload carried nothing else — so an experiment's output
+    was unreachable to the thing that wrote the experiment. The reply is
+    composed BEFORE the run executes, and the next turn was handed a counter:
+    `contradicts: 1`. Observed 2026-08-05: a repair that took a suite from 31
+    failures to 0 was graded refuted on a stage-ordering artefact, and the
+    author could not read which of its four predictions had failed, or by how
+    much, from anything it was given. It declined to guess a failure count out
+    of a confidence number, which was right, and then had to re-run a
+    47-second suite to learn what it had already measured.
+
+    The excerpt is the same one the evidence row stores, already fitted to
+    EXCERPT_CHARS with its own elision marker, so this adds about 600
+    characters per row against a memory section of seventy thousand.
+    """
+    return [{"ref": _evidence_ref(r["id"]), "url": r["url"],
+             "stance": r["stance"], "excerpt": r["excerpt"]}
+            for r in q("SELECT id, url, stance, excerpt FROM evidence "
+                       "WHERE hypothesis_id=? ORDER BY id DESC LIMIT ?",
+                       (hid, int(limit)))]
+
+
 def _evidence_ref(row_id):
     return f"ev:{row_id}"
 

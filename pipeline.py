@@ -604,6 +604,17 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
              # the payload said what they had moved FROM.
              "opened_at": research.PRIOR_CONFIDENCE,
              "evidence": research.evidence_tally(h["id"]),
+             # AND WHAT THE EVIDENCE SAID, not only how much of it there was.
+             # The tally alone made a run's own output unreachable to the
+             # thing that wrote the run: the reply is composed before the
+             # experiment executes, and the next turn was handed
+             # `contradicts: 1` and nothing else. A repair that took a suite
+             # from 31 failures to 0 was graded refuted on a stage-ordering
+             # artefact, and its author could not tell which of four
+             # predictions had failed — it declined to guess a count out of a
+             # confidence number, correctly, and re-ran a 47-second suite to
+             # recover what it had already measured.
+             "latest_evidence": research.latest_evidence(h["id"]),
              "last_moved_turn": h["updated_turn"]}
             for h in research.list_hypotheses(status="open", limit=5)],
         # Delivered, not fetched: "how many of which type am I allowed" has

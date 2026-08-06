@@ -352,6 +352,33 @@ def test_a_turn_that_edits_and_runs_says_the_run_came_first(temp_db, tmp_path):
     assert "BEFORE it" in out["reply"]
 
 
+def test_a_hypothesis_carries_what_its_evidence_said_not_only_how_much(
+        temp_db, tmp_path):
+    """A run's output was unreachable to the thing that wrote the run. The
+    reply is composed BEFORE the experiment executes, and the next turn was
+    handed a counter — `contradicts: 1` — and nothing else. A repair that took
+    a suite from 31 failures to 0 was graded refuted on a stage-ordering
+    artefact, and its author could not read which of four predictions had
+    failed, or by how much, from anything it was given. It declined to guess a
+    failure count out of a confidence number and re-ran a 47-second suite to
+    recover a measurement it had already made."""
+    import research
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    _stub(respond={"reply": "checking",
+                   "experiment": [{"hypothesis": "does the marker print?",
+                                   "source": "print('MARKER-9713')\n",
+                                   "expect": {"stdout_has": "MARKER-9713"}}]})
+    pipeline.run_turn("run it")
+
+    hyp = research.list_hypotheses(status="open", limit=5)[0]
+    latest = research.latest_evidence(hyp["id"])
+    assert latest, "the hypothesis carries no evidence at all"
+    assert "MARKER-9713" in latest[0]["excerpt"], latest[0]
+    assert latest[0]["stance"] == "supports"
+    assert latest[0]["ref"].startswith("ev:")
+
+
 def test_a_turn_that_only_edits_gets_no_ordering_caveat(temp_db, tmp_path):
     """A caveat appended to every turn is a caveat nobody reads. It has to
     mean that a run and an edit actually shared a turn."""
