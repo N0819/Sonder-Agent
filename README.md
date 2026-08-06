@@ -1,5 +1,7 @@
 # Sonder Assistant
 
+**Version 1.0** — 22 modules, 437 tests, offline suite.
+
 A single-user chatbot with an assistant persona, real long-term memory, and
 evidence-driven research over the web. It is the cognition core of
 [Sonder Engine](../Sonder_Engine) — a multi-agent interactive-fiction system —
@@ -7,7 +9,7 @@ extracted into a standalone project, with the fiction and the body removed
 and the epistemics kept.
 
 ```bash
-make test   # full suite, offline, ~18s
+make test   # full suite, offline, no network, no model
 make run    # http://localhost:8010 (uvicorn, --reload)
 ```
 
