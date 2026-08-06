@@ -32,6 +32,7 @@
 # should read, not a 500.
 
 import difflib
+import hashlib
 import os
 import re
 import shutil
@@ -360,10 +361,19 @@ def write_file(relative, contents, session_id=None):
             handle.write(text)
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"could not write {relative!r}: {exc}"}
+    # THE DIGESTS OF BOTH SIDES, because a diff cannot answer "did the rest of
+    # the file survive". Reviewing its own edit a turn later, the assistant
+    # could establish only that the recorded hunk was insertion-only — no `-`
+    # lines — and said so plainly rather than letting "looks right" pass as
+    # "identical". It was reasoning correctly from the only evidence it had,
+    # and the evidence was short by one measurement this call already holds
+    # both halves of.
     return {"ok": True, "path": relative, "created": not existed,
             "diff": diff_text(before, text, relative),
             "before_bytes": len(before.encode()),
             "after_bytes": len(text.encode()),
+            "before_sha256": hashlib.sha256(before.encode()).hexdigest(),
+            "after_sha256": hashlib.sha256(text.encode()).hexdigest(),
             "unchanged": before == text}
 
 

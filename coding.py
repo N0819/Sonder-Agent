@@ -951,6 +951,12 @@ def apply_edit(path, contents=None, *, turn_idx, replace=None,
         f"I edited {result['path']} in the workspace"
         + (f" because {why}" if why else "")
         + (" (new file)" if result["created"] else "")
+        # IN THE MEMORY, not only the return value, because the question is
+        # always asked a turn later. "Is the rest of the file byte-for-byte
+        # what it was" is answerable from recall alone with these two, and
+        # from nothing else the record keeps.
+        + f". sha256 {result.get('before_sha256', '?')[:16]}"
+          f" -> {result.get('after_sha256', '?')[:16]}"
         + f". Diff:\n{head}",
         gist=f"edited {result['path']}" + (f": {why}" if why else ""),
         turn_idx=turn_idx, session_id=session_id,
@@ -958,6 +964,8 @@ def apply_edit(path, contents=None, *, turn_idx, replace=None,
     return {"ok": True, "path": result["path"], "diff": result["diff"],
             "created": result["created"], "unchanged": result["unchanged"],
             "rechunked": rechunked,
+            "before_sha256": result.get("before_sha256"),
+            "after_sha256": result.get("after_sha256"),
             "gated_on": hypothesis_id,
             "why": "no reproduction required for this edit"
                    if hypothesis_id is None else

@@ -1018,7 +1018,9 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
         edits.append({k: done[k] for k in
                       ("path", "diff", "created", "unchanged", "rechunked")}
                      | {"gated_on": done.get("gated_on"),
-                        "gate": done.get("why")})
+                        "gate": done.get("why"),
+                        "before_sha256": done.get("before_sha256"),
+                        "after_sha256": done.get("after_sha256")})
     if edits:
         # The DIFF goes in the trace, not a line count. An edit reported as
         # "wrote 812 lines" is unreviewable — the reader has to hold both

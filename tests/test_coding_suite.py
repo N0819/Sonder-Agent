@@ -1159,3 +1159,34 @@ def test_a_refusal_does_not_offer_the_hypothesis_it_just_refused(temp_db):
                             session_id=1)
     assert not out["ok"]
     assert "HAVE been observed failing" not in out["why"], out["why"]
+
+
+def test_an_edit_records_the_digest_of_both_sides(temp_db, tmp_path):
+    """A diff cannot answer "did the rest of the file survive". Reviewing its
+    own edit a turn later, the assistant could establish only that the recorded
+    hunk was insertion-only, and said so rather than letting "looks right" pass
+    as "identical" — correct reasoning from evidence that was short by one
+    measurement `write_file` already holds both halves of. The digests go in
+    the MEMORY too, because the question is always asked a turn later and
+    recall is the only thing reliably there to answer it."""
+    import hashlib
+    import db
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    sid = db.ensure_session()
+    before = "one\ntwo\n"
+    workspace.store_upload(sid, "notes.md", before.encode())
+
+    out = coding.apply_edit("notes.md", turn_idx=1, session_id=sid,
+                            replace=[{"old": "two\n", "new": "two\nthree\n"}],
+                            why="add a line")
+    assert out["ok"], out
+    assert out["before_sha256"] == hashlib.sha256(before.encode()).hexdigest()
+    assert out["after_sha256"] == hashlib.sha256(
+        b"one\ntwo\nthree\n").hexdigest()
+
+    recalled = [dict(r) for r in db.q(
+        "SELECT gist, content FROM memories WHERE gist LIKE 'edited notes.md%'")]
+    assert recalled, "the edit was not witnessed at all"
+    assert out["before_sha256"][:16] in recalled[0]["content"]
+    assert out["after_sha256"][:16] in recalled[0]["content"]
