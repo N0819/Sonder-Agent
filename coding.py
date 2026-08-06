@@ -440,12 +440,21 @@ def _archive_of(payload):
     program rather than one whose program was stored somewhere else. Nowhere
     else was storing it.
 
+    THE PROGRAM IS NOT THE WORKSPACE IT RAN IN. A first version archived the
+    whole payload, which for any run over the user's tree is the entire
+    snapshot: `source_chars` read 10,601,573 and the stored 8,000 characters
+    were the alphabetically first markdown file in the workspace. That is
+    strictly worse than storing nothing — an empty row admits it is empty,
+    while a row holding the wrong file at a plausible length does not. So only
+    the files the run's AUTHOR wrote are archived; the workspace is already on
+    disk and recoverable without this row.
+
     The row is a record, not a filesystem — bodies are named and joined, and
     the caller's `[:8000]` truncation still applies with the true length
     beside it.
     """
     parts = []
-    for name in sorted(payload):
+    for name in sorted(payload or {}):
         body = payload[name]
         if isinstance(body, (bytes, bytearray)):
             body = f"<{len(body)} bytes, not text>"
@@ -455,7 +464,7 @@ def _archive_of(payload):
 
 def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                    files=None, command=None, timeout=None, note="",
-                   cwd="", collect=(), session_id=None):
+                   cwd="", collect=(), session_id=None, workspace_files=None):
     """One experiment: predict, run, judge, record as evidence.
 
     Returns {outcome, why, result, evidence, repeated}. The evidence row is an
@@ -489,7 +498,16 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     #
     # A named command needs no source. Only the bare `python3 main.py` default
     # does, and that is the one path that now insists on it.
-    payload = dict(files or {})
+    #
+    # `workspace_files` is the tree the run happens INSIDE; `files` is the
+    # program the run's author wrote. They merge to one payload on disk and
+    # they are kept apart for the record, because archiving a whole workspace
+    # under the name of a program is how the row ends up holding a file nobody
+    # wrote — see `_archive_of`. Authored files win the collision, as they did
+    # when `.update` did the merging one layer up.
+    authored = dict(files or {})
+    payload = dict(workspace_files or {})
+    payload.update(authored)
     shadowed = ""
     if str(source).strip():
         # `source` ALWAYS lands in main.py, and silently overwrote whatever
@@ -500,16 +518,20 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
         # output was `NameError: PLACEHOLDER_REPLACED_BY_SOURCE`. Silent
         # either way, so it is reported rather than resolved: guessing which
         # one was meant is how the wrong file wins quietly.
-        if payload.get("main.py") not in (None, source):
+        if authored.get("main.py") not in (None, source):
             shadowed = "main.py"
-        payload["main.py"] = source
-    elif command is None and not str(payload.get("main.py") or "").strip():
+        authored["main.py"] = payload["main.py"] = source
+    elif command is None and not str(authored.get("main.py") or "").strip():
         # THE GUARD ASKS WHETHER THERE IS A PROGRAM, not which argument it
         # arrived in. It used to demand `source` or an explicit command, so a
         # caller that put its program straight into `files["main.py"]` — the
         # exact file the default command runs — was turned away for having no
         # program, with main.py sitting in the payload. Same shape as the
         # defect above it: the check named the parameter instead of the thing.
+        #
+        # It asks `authored`, not the merged payload: a workspace that happens
+        # to contain a main.py is not a request to run it, and refusing is the
+        # side of that ambiguity where nothing executes by accident.
         return {"outcome": OUTCOME_INCONCLUSIVE,
                 "why": "an experiment needs either source to run or a command "
                        "naming what to run",
@@ -575,7 +597,7 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     #
     # AND IT ARCHIVES WHAT RAN, not the argument it happened to arrive in. A
     # `files`-only run stored nothing at all — see `_archive_of`.
-    archive = source if source.strip() else _archive_of(payload)
+    archive = source if source.strip() else _archive_of(authored)
     qi("INSERT INTO experiments(hypothesis_id,digest,source,source_chars,"
        "command,expect,outcome,observation,note,turn_idx,created) "
        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",

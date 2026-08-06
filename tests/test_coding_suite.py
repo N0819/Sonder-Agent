@@ -479,6 +479,43 @@ def test_a_program_written_straight_into_main_py_is_not_turned_away(temp_db):
     assert "the one that ran" in row["source"], "the run recorded no program"
 
 
+def test_the_workspace_a_run_happened_in_is_not_archived_as_its_program(
+        temp_db):
+    """Archiving the whole payload made a run over the user's tree record
+    `source_chars=10,601,573` with the stored 8,000 characters taken from the
+    alphabetically first file in the workspace. That is worse than storing
+    nothing: an empty row admits it is empty, and a row holding the wrong file
+    at a plausible length does not. The workspace is already on disk."""
+    from db import q
+    hyp = research.open_hypothesis("what got archived?", turn_idx=1)
+    big = {f"vendor/doc_{i}.md": "padding\n" * 500 for i in range(20)}
+    out = coding.run_experiment(
+        hyp["id"], workspace_files=big,
+        files={"probe.py": "print('mine')\n"},
+        command=[sys.executable, "-s", "probe.py"],
+        expect={"stdout_has": "mine"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+    row = q("SELECT source, source_chars FROM experiments "
+            "WHERE hypothesis_id=?", (hyp["id"],), one=True)
+    assert "print('mine')" in row["source"]
+    assert "vendor/doc_0.md" not in row["source"], "the workspace got archived"
+    assert row["source_chars"] < 1000, row["source_chars"]
+
+
+def test_the_workspace_still_reaches_the_disk_the_run_uses(temp_db):
+    """Separating the two must not stop the workspace being THERE — the whole
+    point of a run over the user's tree is that the tree is present. Kept
+    apart for the record, merged for the disk."""
+    hyp = research.open_hypothesis("is the tree there?", turn_idx=1)
+    out = coding.run_experiment(
+        hyp["id"], workspace_files={"lib/thing.py": "VALUE = 'from-tree'\n"},
+        files={"probe.py": "import sys; sys.path.insert(0, 'lib')\n"
+                           "import thing; print(thing.VALUE)\n"},
+        command=[sys.executable, "-s", "probe.py"],
+        expect={"stdout_has": "from-tree"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+
+
 def test_an_experiment_with_no_program_anywhere_is_still_refused(temp_db):
     """Widening the guard to look at the payload must not widen it to nothing:
     a call with no source, no command and no main.py has nothing to run, and

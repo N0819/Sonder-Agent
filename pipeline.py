@@ -801,17 +801,29 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
         #
         # The warning also says WHICH half is missing. "no hypothesis or no
         # source" left the author guessing at their own mistake.
-        if not question or not (source.strip() or command):
+        # A program written straight into `files["main.py"]` is a program too,
+        # for the same reason a command is: the check has to ask whether there
+        # is something to run, not which key it arrived under.
+        spec_files = spec.get("files") if isinstance(spec.get("files"),
+                                                     dict) else {}
+        wrote_main = str(spec_files.get("main.py") or "").strip()
+        if not question or not (source.strip() or command or wrote_main):
             missing = "hypothesis" if not question else "source or command"
             warnings.append(f"dropped an experiment with no {missing}")
             continue
         hyp = research.open_hypothesis(question, turn_idx, session_id)
         # The user's uploaded files are the working set: "run the tests in
         # this zip" is the same workspace as "here is a zip".
-        files = workspace.snapshot_for_sandbox(session_id)
-        files.update({str(k): str(v)
-                      for k, v in (spec.get("files") or {}).items()
-                      if isinstance(spec.get("files"), dict)})
+        #
+        # They go in as the WORKSPACE, separately from the files this turn
+        # wrote, because the experiments row archives the program and the two
+        # were indistinguishable once merged here: a run over the user's tree
+        # recorded `source_chars=10,601,573` and stored the first eight
+        # thousand characters of the alphabetically first file in it.
+        workspace_files = workspace.snapshot_for_sandbox(session_id)
+        files = {str(k): str(v)
+                 for k, v in (spec.get("files") or {}).items()
+                 if isinstance(spec.get("files"), dict)}
         # THE MOST INTERESTING THING A TURN DOES, AND IT RAN SILENTLY. The
         # stage emitted nothing at all: a suite run holds the turn for up to
         # three minutes with no step in the panel, which is the same "is it
@@ -832,6 +844,7 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             outcome = coding.run_experiment(
                 hyp["id"], source=source, expect=spec.get("expect"),
                 turn_idx=turn_idx, files=files,
+                workspace_files=workspace_files,
                 command=command, timeout=spec.get("timeout"),
                 note=str(spec.get("note") or "")[:200],
                 cwd=str(spec.get("cwd") or ""),
