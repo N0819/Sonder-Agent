@@ -993,31 +993,55 @@ def test_an_experiment_can_run_inside_the_project_it_is_testing(temp_db):
     assert "STATIC True" in inside["stdout"]
 
 
-def test_a_run_imports_from_the_directory_it_runs_in(temp_db):
-    """PYTHONPATH carried the workspace root and nothing else, and Python puts
-    the SCRIPT's directory on sys.path rather than the working directory. So
-    once the default command learned to reach a `main.py` at the root from a
-    `cwd` below it, the program started and then could not import the project
-    it had been pointed at — `ModuleNotFoundError: No module named 'db'` from
-    a run whose whole purpose was to read `db.py`. Half-working is the worst
-    of the three states: the first version could not find the program, the
-    second found it and stranded it, and only the failure moved."""
-    files = {"proj/lib.py": "VALUE = 'from-cwd'\n",
-             "main.py": "import lib\nprint('OK', lib.VALUE)\n"}
-    out = sandbox.run(files, [sys.executable, "-s", "../main.py"], cwd="proj")
+def test_a_callers_own_command_sees_the_environment_a_developer_would(temp_db):
+    """Putting `cwd` on PYTHONPATH unconditionally made the sandbox unlike the
+    machine it stands in for, and a real project noticed inside an hour:
+
+        ROOT = Path(__file__).resolve().parents[1]
+        if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
+
+    is a guard that inserts the project root at the FRONT when it is absent.
+    Put it on PYTHONPATH and the guard sees it present, skips the insert, and
+    leaves the script's own directory first — where `from pipeline_trace
+    import ...` finds the script instead of the module it names. One
+    previously-passing test went red in a suite that had just been repaired to
+    zero, on a change meant to be invisible."""
+    files = {"proj/tools/cli.py":
+                 "import sys, pathlib\n"
+                 "ROOT = pathlib.Path(__file__).resolve().parents[1]\n"
+                 "print('GUARD_WOULD_INSERT', str(ROOT) not in sys.path)\n",
+             "proj/keep.py": "x = 1\n"}
+    out = sandbox.run(files, [sys.executable, "-s", "tools/cli.py"],
+                      cwd="proj")
     assert out["exit_code"] == 0, out["stderr"]
-    assert "OK from-cwd" in out["stdout"]
+    assert "GUARD_WOULD_INSERT True" in out["stdout"], out["stdout"]
 
 
 def test_the_workspace_root_stays_importable_from_a_subdirectory(temp_db):
-    """Adding the run directory must not displace the root: a run in `proj/`
-    still has to reach a helper the caller left at the top."""
+    """The root has to stay reachable whatever else is on the path: a run in
+    `proj/` still needs a helper the caller left at the top."""
     files = {"shared.py": "NAME = 'at-the-root'\n",
              "proj/keep.py": "x = 1\n",
              "main.py": "import shared\nprint('OK', shared.NAME)\n"}
     out = sandbox.run(files, [sys.executable, "-s", "../main.py"], cwd="proj")
     assert out["exit_code"] == 0, out["stderr"]
     assert "OK at-the-root" in out["stdout"]
+
+
+def test_a_program_we_relocated_can_import_from_where_it_runs(temp_db):
+    """The other half of the contract. When `source` is given with `cwd`, the
+    program is written to a path the caller did not choose — the payload root
+    — and pointed at from below, so Python's script-directory rule puts the
+    wrong directory on sys.path and `import db` fails from a run whose whole
+    purpose was to read `db.py`. We moved it, so we make `cwd` importable;
+    a caller's own command gets no such help, by the test above."""
+    hyp = research.open_hypothesis("can a relocated program import?",
+                                   turn_idx=1)
+    out = coding.run_experiment(
+        hyp["id"], source="import lib\nprint('OK', lib.VALUE)\n",
+        workspace_files={"pkg/lib.py": "VALUE = 'from-cwd'\n"}, cwd="pkg",
+        expect={"exit_zero": True, "stdout_has": "OK from-cwd"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
 
 
 def test_a_run_directory_outside_the_workspace_is_refused(temp_db):

@@ -227,7 +227,7 @@ MAX_COLLECT_BYTES = 200_000
 
 
 def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
-        import_paths=(), collect=(), cwd=""):
+        import_paths=(), collect=(), cwd="", cwd_importable=False):
     """Write `files` into a throwaway workspace, run `command`, report.
 
     `files` is {relative_path: contents}. `command` is an argv list. Returns a
@@ -360,19 +360,28 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                     "stderr": f"no such directory in the workspace: {cwd!r}",
                     "truncated": False, "seconds": 0.0, "timed_out": False,
                     "harness": harness}
-        # A DIRECTORY YOU RUN IN IS A DIRECTORY YOU IMPORT FROM. PYTHONPATH
-        # carried the workspace root and nothing else, and Python puts the
-        # SCRIPT's directory on sys.path, not the working directory — so once
-        # the default command learned to reach a `main.py` at the root from a
-        # `cwd` below it, the program started and then could not import the
-        # project it had been pointed at:
-        #   ModuleNotFoundError: No module named 'db'
-        # from a run whose whole purpose was to read `db.py` two directories
-        # down. Half-working is the worst of the three states: the first
-        # version could not find the program, this one found it and stranded
-        # it, and only the failure moved.
+        # ONLY WHEN WE MOVED THE PROGRAM. A run whose program we synthesised
+        # at the payload root and then pointed at from a `cwd` below cannot
+        # import that directory, because Python puts the SCRIPT's directory on
+        # sys.path and never the working one — so `source` plus `cwd` came
+        # back `ModuleNotFoundError: No module named 'db'` from a run whose
+        # whole purpose was to read `db.py`.
+        #
+        # BUT A CALLER'S OWN COMMAND MUST SEE THE REAL ENVIRONMENT. Adding
+        # `cwd` unconditionally made the sandbox unlike the machine it is
+        # standing in for, and a real project noticed within the hour:
+        #   ROOT = Path(__file__).resolve().parents[1]
+        #   if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
+        # is a guard that inserts the project root at the FRONT when it is
+        # absent. Put it on PYTHONPATH and the guard sees it present, skips
+        # the insert, and leaves the script's own directory first — where the
+        # import finds the script instead of the module it names. One
+        # previously-passing test went red, in a suite that had just been
+        # repaired to zero, on a change that was supposed to be invisible.
+        # A developer standing in that directory does not have it on
+        # PYTHONPATH, so neither should a run that is imitating them.
         paths = list(import_paths or [])
-        if run_dir != workspace:
+        if cwd_importable and run_dir != workspace:
             paths.insert(0, run_dir)
         started = time.perf_counter()
         try:

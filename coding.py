@@ -507,6 +507,7 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     # wrote — see `_archive_of`. Authored files win the collision, as they did
     # when `.update` did the merging one layer up.
     authored = dict(files or {})
+    moved_program = False
     payload = dict(workspace_files or {})
     payload.update(authored)
     shadowed = ""
@@ -552,6 +553,10 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
         # of a hypothesis, but it cost the turn every time.
         here = os.path.relpath("main.py", str(cwd or "") or ".")
         command = [sys.executable, "-s", here.replace(os.sep, "/")]
+        # We put the program somewhere the caller did not choose, so we
+        # also make `cwd` importable. A caller's OWN command gets the
+        # environment a developer would have, untouched.
+        moved_program = True
     # `collect` UNION the predicted paths, never instead of them. Deriving
     # the list from the prediction is what stops a file predicate being judged
     # against a file nobody read back — but it also made "give me that file"
@@ -563,7 +568,8 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                   | {str(p) for p in (collect or ())})
     result = sandbox.run(payload, command,
                          timeout=timeout or sandbox.DEFAULT_TIMEOUT,
-                         collect=want, cwd=cwd)
+                         collect=want, cwd=cwd,
+                         cwd_importable=moved_program)
 
     outcome, why = judge(result, expect)
     digest = _digest(hypothesis_id, source, command, expect, payload)
