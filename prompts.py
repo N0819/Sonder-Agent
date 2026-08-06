@@ -101,6 +101,7 @@ Return ONLY a JSON object:
   "ponder": {{"query": "...", "why": "..."}},
   "need_more": {{"ponder": "ask your own memory", "list_dir": "src/models",
                  "outline": "coding.py", "expand_chunks": ["c1a2b3"],
+                 "read_file": "_runs/ab12cd34/counts.txt",
                  "search": "a web query", "why": "..."}},
   "dispute": {{"memory_ref": "event:...", "reading": "what it means now"}},
   "experiment": [{{"hypothesis": "the question the run settles",
@@ -322,6 +323,15 @@ something you do not have in front of you:
   Those entries are GISTS: a one-line description and an id, never the code
   itself. Naming the ids you want is how you read the actual lines. `showing`
   below `total_chunks` means the list itself is partial.
+- `need_more.read_file` takes a PATH and returns the bytes, up to 200,000 of
+  them. `outline` and `expand_chunks` both go through the code index, which
+  covers source languages and prose and nothing else — so a `.txt`, a `.log`,
+  a CSV or a collected run output is listable by `list_dir`, complete on
+  disk, and answers "no indexed file matches" when you outline it. That is a
+  gap in the map, not an absent file. Use `read_file` whenever you know the
+  path and want the contents: files a run collected into `_runs/`, data files,
+  anything the index skipped. Use `outline` when you want a file's structure
+  and ids to expand, which is still the right lane for code.
 - TO EDIT A FILE YOU HAVE NOT READ: outline it, expand the pieces you will
   change, then anchor `replace` on text copied from the expansion. Never
   anchor on a gist — a gist is a description, not the line.

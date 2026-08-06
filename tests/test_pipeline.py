@@ -264,6 +264,35 @@ def test_a_dropped_experiment_says_which_half_is_missing(temp_db, tmp_path):
     assert "dropped an experiment with no source or command" in warns
 
 
+def test_a_file_the_index_does_not_cover_can_still_be_read(temp_db, tmp_path):
+    """Every file verb went through the code index, which skips anything with
+    no recognised language — so a `.txt` was listable by `list_dir`, sized,
+    named, and unopenable. Five files a run collected out of a sandbox landed
+    in exactly that hole: delivered, visible in the listing, and `outline`
+    answering "no indexed file matches" for every one. A gap in the map became
+    a file that could not be read, and the gap is invisible from the reading
+    side."""
+    import chunks
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_run_output(0, "ab12cd34", {"counts.txt": "FNF=0\n"})
+    chunks.ingest_workspace(0)
+    # The premise: the index genuinely does not cover it.
+    assert chunks.outline("_runs/ab12cd34/counts.txt", 0).get("chunks", 0) == 0
+
+    _stub(respond={"reply": "ok"}, )
+    step, _refs = pipeline._gather(
+        {"read_file": "_runs/ab12cd34/counts.txt"}, 1, 0,
+        pipeline.turnrun.current() or _NullRun(), [])
+
+    assert step["files_read"][0]["text"] == "FNF=0\n"
+
+
+class _NullRun:
+    def emit(self, *args, **kwargs):
+        pass
+
+
 def test_open_research_carries_the_id_the_gates_ask_for(temp_db):
     """`propose_fix` and an anchored `edit_files` both take a numeric
     `hypothesis_id`, and this payload described the open questions in prose

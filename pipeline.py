@@ -361,6 +361,28 @@ def _gather(more, turn_idx, session_id, run, warnings):
         step["outlines"] = [chunks.outline(p, session_id) for p in paths[:4]]
         run.emit("outline", paths=paths[:4],
                  chunks=sum(o.get("chunks", 0) for o in step["outlines"]))
+    # THE INDEX WAS THE ONLY WAY TO READ A FILE, AND IT DOES NOT COVER EVERY
+    # FILE. `outline` and `expand_chunks` both go through chunks, which skips
+    # anything with no recognised language — so a `.txt` in the workspace was
+    # listable by `list_dir`, sized, named, and unopenable. Collected run
+    # output landed in exactly that hole: five files delivered out of a
+    # sandbox, visible in the listing, and `outline` answering "no indexed
+    # file matches" for every one of them.
+    #
+    # An index is a map of what is worth ranking. Making it the only door to
+    # the bytes means every gap in it becomes a file that cannot be read, and
+    # the gap is invisible from the reading side — the same shape as the
+    # stale-chunk and the withheld-file failures. So: one verb that opens a
+    # path, bounded and guarded, that no indexing decision can stand in front
+    # of.
+    reads = more.get("read_file")
+    if isinstance(reads, str) or isinstance(reads, list):
+        paths = [reads] if isinstance(reads, str) else [str(p) for p in reads]
+        step["files_read"] = [{"path": p, **workspace.read_file(p, session_id)}
+                              for p in paths[:4]]
+        run.emit("read", paths=paths[:4],
+                 chars=sum(len(f.get("text") or "")
+                           for f in step["files_read"]))
     ids = more.get("expand_chunks")
     if isinstance(ids, list) and ids:
         expanded = chunks.expand(session_id, ids)
