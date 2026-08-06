@@ -1,6 +1,6 @@
 # Ponder Engine
 
-**Version 1.0** — 22 modules, 437 tests, offline suite.
+**Version 1.1** — 24 modules, 502 tests, offline suite.
 Released as **Sonder Assistant**; renamed, same project.
 
 A single-user chatbot with an assistant persona, real long-term memory, and
@@ -191,10 +191,13 @@ appears).
   Research, Beliefs, Files (drag-and-drop upload + archive extraction),
   Subagents (the permission surface), Settings (provider + persona).
 - **Provider choice** (`config.py`): an OpenAI-compatible endpoint or the
-  **Claude Code CLI**, selectable from Settings without a restart. Secrets
-  are never stored: a settings row holds the NAME of an environment variable
-  and the UI shows only whether it resolves, so a live credential never
-  lands in `assistant.db` beside the memory bank.
+  **Claude Code CLI**, selectable from Settings without a restart. A key is
+  either NAMED — a settings row holding the name of an environment variable —
+  or STORED outright (`KEY_VALUE_FIELDS`), because a browser-only install has
+  no environment to export into. Storing one makes `assistant.db` a credential
+  store, so `db.connect` chmods it 0600 on open, `redacted_status` is the only
+  shape a route may return, and the settings page can report a stored key but
+  never re-display it. What was typed beats a stale export.
 - **A file workspace** (`workspace.py`): drag-and-drop uploads per session,
   readable by the sandbox, with archive extraction whose threat model is the
   ARCHIVE rather than the user — zip slip, absolute members, symlink members
@@ -214,6 +217,22 @@ appears).
   reversible from the Memory panel. Commitments, disputed rows and
   retirement notes are refused. Hard deletion is host-only, confirmed, and
   spares anything a summary still cites.
+- **Debugging somebody else's engine** (`refdb.py`, `storydb.py`,
+  `enginelab.py`): three layered lanes, each refusing to be the one below it.
+  `refdb` reads a database too large to copy — one read-only statement, capped
+  in rows, characters and wall clock, with credential redaction folded in at
+  the one point every cell passes through, because a reference database is
+  somebody else's database and it holds their keys. `storydb` addresses a
+  story the way a bug report does — by the name a person says and the turn
+  they counted — and will not pick among ambiguous names, since branches are
+  named by suffixing the parent and a silently chosen chat yields a theory
+  that is consistent, checkable, and about a different story. `enginelab`
+  gives the assistant a scratch engine of its own: a database bootstrapped by
+  the engine's own `db.init()`, seeded with a story, driven through the same
+  pipeline the engine's server uses, against the source tree in the workspace
+  — so an edit becomes an observation rather than an argument. Always a
+  subprocess, because both projects have a top-level `db`. The provider key is
+  copied by the child and never returned to the parent.
 - **Subagents** (`subagents.py`): a `deep` type (full cognitive suite, own
   temporary database, own sandbox, archived then torn down) and a read-only
   `scout`. Spawning requires a host-held grant the assistant can read and
@@ -242,7 +261,10 @@ workspace.py   uploaded files, safe extraction, the sandbox working set
 codemap.py     how an agent navigates code it has never seen
 subagents.py   delegation, the grant ledger, coordination, collaboration
 subagent_runner.py  one deep subagent's whole life, in a subprocess
-tests/         187 regression tests, engine-style docstrings, fully offline
+refdb.py       read-only queries into a database too large to copy
+storydb.py     a story in a live engine, by the name a person uses
+enginelab.py   a scratch engine of its own, to seed and break
+tests/         502 regression tests, engine-style docstrings, fully offline
 ```
 
 See `DESIGN.md` for the pipeline written out stage by stage, how
