@@ -479,6 +479,71 @@ def reingest_path(relative, session_id=WORKSPACE):
                    split_code(got["text"], language)))
 
 
+def _stale_since_indexed(session_id, refs):
+    """Which of these sources have changed on disk since they were chunked.
+
+    THE INDEX CANNOT TELL YOU IT IS OUT OF DATE, and from inside a turn a stale
+    entry is indistinguishable from a current one. Measured, not supposed: a
+    file was overwritten from outside at 08:46:56 while its chunks had been
+    written at 23:39 the night before, and `outline` went on listing two
+    functions that were nowhere on disk, with `expand` returning their full
+    bodies. The assistant read them, believed them, and reported them as the
+    present state of the file — correctly, given what it was handed.
+
+    `put` already stamps `created`, so this needs no new column: the file's
+    mtime against the newest chunk written for it is the whole comparison.
+
+    A source whose file cannot be found is NOT reported stale. It may have been
+    deleted, or the workspace root may have moved under us, and calling that
+    "changed" would put a warning on every chunk of every session that no
+    longer has a tree — which is the noise that gets a warning ignored.
+    """
+    import os
+    import workspace
+
+    refs = [r for r in dict.fromkeys(refs) if r]
+    if not refs:
+        return {}
+    try:
+        root = workspace.session_root(_scope(session_id))
+    except Exception:  # noqa: BLE001 - no root is not a staleness claim
+        return {}
+    marks = {r["source_ref"]: r["indexed_at"] for r in q(
+        "SELECT source_ref, MAX(created) AS indexed_at FROM chunks "
+        "WHERE session_id=? GROUP BY source_ref",
+        (_scope(session_id),)) or []}
+    out = {}
+    for ref in refs:
+        indexed_at = marks.get(ref)
+        if not indexed_at:
+            continue
+        try:
+            mtime = os.path.getmtime(os.path.join(root, ref))
+        except OSError:
+            continue
+        # A whole second of slack: the mtime and `time.time()` are taken from
+        # different clocks' worth of rounding, and a file chunked in the same
+        # second it was written must not read as changed since.
+        if mtime > float(indexed_at) + 1.0:
+            out[ref] = {"indexed_at": float(indexed_at), "mtime": mtime,
+                        "why": "this file changed on disk after it was "
+                               "indexed — what follows is the OLD version. "
+                               "Read it with `read_file` to see what is there "
+                               "now."}
+    return out
+
+
+def _staleness(stale, source_ref):
+    """The staleness note for one source, or nothing at all when it is current.
+
+    Nothing at all, deliberately: a `stale: false` on every chunk of every
+    expansion is noise on the common path, and a field that is almost always
+    the same value stops being read long before the day it changes.
+    """
+    hit = stale.get(source_ref)
+    return {"stale": True, "changed_on_disk": hit} if hit else {}
+
+
 def outline(path, session_id=WORKSPACE, limit=200):
     """Every chunk of ONE named file: id, title, gist, line range.
 
@@ -523,7 +588,12 @@ def outline(path, session_id=WORKSPACE, limit=200):
                 "gist": r["gist"], "lines": [r["start_line"], r["end_line"]],
                 "chars": r["chars"]}
                for r in rows if r["source_ref"] == source][:limit]
+    stale = _stale_since_indexed(session_id, [source]).get(source)
     return {"path": source, "chunks": len(entries), "entries": entries,
+            # SAID HERE, because this is where a reader decides to trust the
+            # list. Without it the outline of a file overwritten from outside
+            # is indistinguishable from the outline of one that was not.
+            **({"stale": True, "changed_on_disk": stale} if stale else {}),
             "how_to_use_this": (
                 "The whole file as an ordered list of pieces. Put the ids you "
                 "need in `expand_chunks` to read their actual lines — an "
@@ -545,6 +615,11 @@ def expand(session_id=WORKSPACE, ids=(), budget=MAX_EXPAND_CHARS):
         "SELECT chunk_key,kind,source_ref,title,gist,body,start_line,end_line "
         "FROM chunks WHERE session_id=? AND chunk_key IN (%s)"
         % ",".join("?" * len(wanted)), (session_id, *wanted))}
+    # WHATEVER THIS RETURNS, IT IS BODIES — the thing an assistant reads and
+    # then quotes as the present state of a file. A stale one is a false report
+    # about the present, and it is the reader who pays for it.
+    stale = _stale_since_indexed(
+        session_id, [r["source_ref"] for r in rows.values()])
     out, spent = [], 0
     for key in wanted:
         row = rows.get(key)
@@ -569,13 +644,15 @@ def expand(session_id=WORKSPACE, ids=(), budget=MAX_EXPAND_CHARS):
             body = body[:max(0, budget - spent)]
             out.append({"id": key, "source": row["source_ref"],
                         "title": row["title"], "text": body,
-                        "truncated_by_budget": True})
+                        "truncated_by_budget": True,
+                        **_staleness(stale, row["source_ref"])})
             break
         spent += len(body)
         out.append({"id": key, "source": row["source_ref"],
                     "title": row["title"],
                     "lines": [row["start_line"], row["end_line"]],
-                    "text": body})
+                    "text": body,
+                    **_staleness(stale, row["source_ref"])})
     return out
 
 

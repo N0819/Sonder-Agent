@@ -7,6 +7,7 @@
 # about their size.
 
 import json
+import time
 
 import chunks
 import pipeline
@@ -667,3 +668,94 @@ def test_the_digest_budget_bounds_the_payload_not_just_the_entries(temp_db,
     assert d["showing"] > 0, "a budget that shows nothing is not a budget"
     assert d["total_chunks"] > d["showing"], \
         "the corpus must exceed the budget or this proves nothing"
+
+
+def test_an_outline_says_when_the_file_changed_after_it_was_indexed(
+        temp_db, tmp_path):
+    """THE INDEX CANNOT TELL YOU IT IS OUT OF DATE, and from inside a turn a
+    stale entry is indistinguishable from a current one.
+
+    Measured, not supposed: a file was overwritten from outside at 08:46:56
+    while its chunks had been written at 23:39 the night before. `outline` went
+    on listing two functions that were nowhere on disk and `expand` returned
+    their full bodies. The assistant read them, believed them, and reported
+    them as the present state of the file — correctly, given what it was
+    handed. It caught the contradiction only because it happened to have an
+    independent reason to doubt the count.
+    """
+    import os
+    import chunks
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    root = workspace.session_root(chunks.WORKSPACE)
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "sample.py")
+    with open(path, "w") as fh:
+        fh.write("def alpha():\n    \"\"\"First.\"\"\"\n    return 1\n")
+    chunks.ingest_workspace(chunks.WORKSPACE)
+
+    fresh = chunks.outline("sample.py")
+    assert fresh["entries"], fresh
+    assert "stale" not in fresh, "a current index must not cry stale"
+
+    # Rewritten from outside, exactly as a sync does. Two seconds, because the
+    # comparison allows a second of clock slack on purpose.
+    with open(path, "w") as fh:
+        fh.write("def beta():\n    \"\"\"Different.\"\"\"\n    return 2\n")
+    os.utime(path, (time.time() + 2, time.time() + 2))
+
+    stale = chunks.outline("sample.py")
+    assert stale.get("stale") is True, stale
+    assert "changed on disk" in stale["changed_on_disk"]["why"]
+    # The old entries are still listed — that is the point. They are now
+    # labelled rather than withdrawn, so a reader can tell what it is holding.
+    assert stale["entries"]
+
+
+def test_an_expanded_body_from_a_changed_file_says_so(temp_db, tmp_path):
+    """`expand` is the one that returns BODIES — the text an assistant quotes
+    as the present state of a file. A stale outline misleads about structure; a
+    stale expansion puts lines that do not exist into a report.
+    """
+    import os
+    import chunks
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    root = workspace.session_root(chunks.WORKSPACE)
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "sample.py")
+    with open(path, "w") as fh:
+        fh.write("def alpha():\n    \"\"\"First.\"\"\"\n    return 1\n")
+    chunks.ingest_workspace(chunks.WORKSPACE)
+    ids = [e["id"] for e in chunks.outline("sample.py")["entries"]]
+
+    assert all("stale" not in e for e in chunks.expand(ids=ids))
+
+    with open(path, "w") as fh:
+        fh.write("def beta():\n    \"\"\"Different.\"\"\"\n    return 2\n")
+    os.utime(path, (time.time() + 2, time.time() + 2))
+
+    got = chunks.expand(ids=ids)
+    assert got and all(e.get("stale") is True for e in got), got
+    assert "read_file" in got[0]["changed_on_disk"]["why"]
+
+
+def test_a_deleted_file_is_not_reported_as_changed(temp_db, tmp_path):
+    """A warning on every chunk of every session whose tree has moved is the
+    noise that gets a warning ignored. Absent is not the same as changed, and
+    only one of them means "what you are reading is the old version".
+    """
+    import os
+    import chunks
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    root = workspace.session_root(chunks.WORKSPACE)
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "sample.py")
+    with open(path, "w") as fh:
+        fh.write("def alpha():\n    \"\"\"First.\"\"\"\n    return 1\n")
+    chunks.ingest_workspace(chunks.WORKSPACE)
+    ids = [e["id"] for e in chunks.outline("sample.py")["entries"]]
+    os.remove(path)
+
+    assert all("stale" not in e for e in chunks.expand(ids=ids))
