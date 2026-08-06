@@ -774,7 +774,23 @@ SNAPSHOT_MAX_FILES = 2000
 # gives exactly the same, because the workspace saturates. So this is not a
 # budget with headroom bolted on, it is the size of the thing being copied,
 # and the archive rule above is what keeps raw story data out of it.
-SNAPSHOT_MAX_BYTES = 12 << 20
+#
+# RAISED TO 24 MB 2026-08-05, because the premise above stopped holding. That
+# measurement's whole force was that the workspace SATURATED under 12 — one
+# repository, 10.5 MB, and 16 MB bought nothing. A second repository in the
+# workspace ends the saturation: the archive tree delivers 10.59 MB and the
+# engine's own source is 8.40 MB, so 12 MB no longer copies the thing, it cuts
+# it. And the cut is the silent kind this file already has scars from — the
+# loser is decided by walk order, not by importance.
+#
+# The cost was measured rather than assumed, because a per-run cost paid on
+# every experiment is exactly the kind that gets waved through: a 1,100-file,
+# 18.9 MB payload writes to a fresh temp directory in 236 ms (80 MB/s), so the
+# extra 12 MB costs about 150 ms per run against experiments that take 50 s.
+# 0.3%. If a third repository arrives, measure again rather than doubling
+# again — the number that matters is what the workspace weighs, not a round
+# figure with room to spare.
+SNAPSHOT_MAX_BYTES = 24 << 20
 
 
 def snapshot_for_sandbox(session_id, max_bytes=SNAPSHOT_MAX_BYTES,

@@ -102,6 +102,7 @@ Return ONLY a JSON object:
   "need_more": {{"ponder": "ask your own memory", "list_dir": "src/models",
                  "outline": "coding.py", "expand_chunks": ["c1a2b3"],
                  "read_file": "_runs/ab12cd34/counts.txt",
+                 "query_db": {{"database": "engine", "sql": "SELECT ..."}},
                  "search": "a web query", "why": "..."}},
   "dispute": {{"memory_ref": "event:...", "reading": "what it means now"}},
   "experiment": [{{"hypothesis": "the question the run settles",
@@ -332,6 +333,23 @@ something you do not have in front of you:
   path and want the contents: files a run collected into `_runs/`, data files,
   anything the index skipped. Use `outline` when you want a file's structure
   and ids to expand, which is still the right lane for code.
+- `need_more.query_db` takes `{{"database": <a name from
+  `reference_databases`>, "sql": <one read-only statement>}}` and returns
+  rows. It exists for data too large to copy: a reference database can be a
+  gigabyte, which is past every limit the workspace has, so it is never
+  delivered to a run and never appears in `list_dir`. Nothing about it is
+  editable — it is evidence, and evidence is read.
+  A COUNT IS THE CHEAPEST FINDING AVAILABLE, and the one this project has
+  most often skipped: mechanisms assumed live turned out to fire zero times,
+  and a whole tier of behaviour had never run at all. When you are about to
+  reason about how something behaves, ask first whether it happened, and
+  measure it against the OPPORTUNITIES it had rather than against every row
+  in the table. `SELECT COUNT(*)` over a large table is a full scan and can
+  be stopped for running long — narrow it with a `WHERE` or a `LIMIT`.
+  The result carries `truncated` and `why`. When `truncated` is true you are
+  holding a sample, and a sample cannot answer "how many" or "does this ever
+  happen" — re-ask with a COUNT or a narrower filter rather than counting the
+  rows you were handed.
 - TO EDIT A FILE YOU HAVE NOT READ: outline it, expand the pieces you will
   change, then anchor `replace` on text copied from the expansion. Never
   anchor on a gist — a gist is a description, not the line.

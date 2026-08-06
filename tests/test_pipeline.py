@@ -293,6 +293,86 @@ class _NullRun:
         pass
 
 
+def test_a_refused_edit_corrects_the_reply_that_claimed_it_landed(temp_db,
+                                                                  tmp_path):
+    """The reply is composed BEFORE the edit stage runs, so it is written in
+    the belief every edit will land. When the reproduce-before-you-fix gate
+    turned one away, the refusal reached the trace and the live panel and the
+    reply went on saying the change was made — observed on a live turn, a
+    reply reporting a section "now marked WITHDRAWN in place, with the run id
+    on the row" against a file whose line still read exactly as before.
+    Nobody reads a trace to check a sentence."""
+    import research
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "notes.md", b"a line that will not change\n")
+    hyp = research.open_hypothesis("does anything fail?", turn_idx=1)
+
+    _stub(respond={
+        "reply": "The correction is now marked WITHDRAWN in place.",
+        "edit_files": [{"path": "notes.md", "contents": "rewritten\n",
+                        "hypothesis_id": hyp["id"], "why": "withdraw it"}]})
+    out = pipeline.run_turn("withdraw that claim")
+
+    # The gate held: nothing was observed failing, so nothing was written.
+    assert workspace.read_file("notes.md", 1)["text"] == (
+        "a line that will not change\n")
+    assert any("edit refused" in w for w in out["trace"]["warnings"])
+    # And the reply itself says so, not only the trace.
+    assert "Not applied." in out["reply"], out["reply"]
+    assert "notes.md" in out["reply"]
+    # The model's own account survives beside it — the disagreement is the
+    # finding, so substituting the reply would hide which one was written.
+    assert "WITHDRAWN in place" in out["reply"]
+
+
+def test_a_reply_whose_edits_all_landed_is_left_alone(temp_db, tmp_path):
+    """A correction appended to every turn is a correction nobody reads. It
+    has to mean that something was actually turned away."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "notes.md", b"before\n")
+
+    _stub(respond={"reply": "Edited it.",
+                   "edit_files": [{"path": "notes.md", "contents": "after\n",
+                                   "why": "the user asked"}]})
+    out = pipeline.run_turn("change it")
+
+    assert workspace.read_file("notes.md", 1)["text"] == "after\n"
+    assert "Not applied." not in out["reply"]
+
+
+def test_a_database_too_large_for_any_copy_lane_is_still_reachable(temp_db,
+                                                                   tmp_path):
+    """Every lane into data copies bytes — the sandbox snapshot builds a
+    payload, `read_file` returns a file, the index stores bodies. A reference
+    database of 1,118,785,536 bytes is 2.1x the workspace ceiling and 550x the
+    per-file snapshot limit, so it reaches none of them, and raising the
+    limits would write a gigabyte into a fresh temp directory per run. The
+    ceilings bind on what a sandbox sees; a fetch verb copies nothing."""
+    import sqlite3
+
+    import refdb
+    path = tmp_path / "big.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE steps(key TEXT)")
+    conn.executemany("INSERT INTO steps VALUES(?)", [("dispute",)] * 3)
+    conn.commit()
+    conn.close()
+    refdb.configure({"engine": str(path)})
+    try:
+        _stub(respond={"reply": "ok"})
+        step, _refs = pipeline._gather(
+            {"query_db": {"database": "engine",
+                          "sql": "SELECT COUNT(*) AS n FROM steps "
+                                 "WHERE key='dispute'"}},
+            1, 0, pipeline.turnrun.current() or _NullRun(), [])
+        assert step["db_query"]["ok"], step["db_query"]
+        assert step["db_query"]["rows"] == [["3"]]
+    finally:
+        refdb.configure({})
+
+
 def test_open_research_carries_the_id_the_gates_ask_for(temp_db):
     """`propose_fix` and an anchored `edit_files` both take a numeric
     `hypothesis_id`, and this payload described the open questions in prose

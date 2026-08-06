@@ -352,9 +352,13 @@ def test_the_files_a_delivered_suite_needs_to_import_arrive_with_it(ws):
         fh.write("<!doctype html>")
     snapshot = workspace.snapshot_for_sandbox(1)
     assert os.path.join("static", "index.html") in snapshot
-    # The ceiling is the size of the tree, not a round number with headroom:
-    # raising it past this buys nothing, which is why it stops here.
-    assert workspace.SNAPSHOT_MAX_BYTES == 12 << 20
+    # The ceiling is the size of the tree, not a round number with headroom.
+    # 12 MB was right while ONE repository saturated the workspace at 10.5 MB;
+    # a second one delivering 8.4 MB ends that, and 12 stops copying the tree
+    # and starts cutting it — by walk order, which is the silent kind. Raised
+    # to 24 MB 2026-08-05 against a measured 150 ms per run. If this assertion
+    # fails again, re-measure what the workspace weighs; do not double it.
+    assert workspace.SNAPSHOT_MAX_BYTES == 24 << 20
 
 
 def test_a_withheld_directory_is_always_named_however_many_files_it_holds(ws):

@@ -32,6 +32,7 @@ import memory
 import persona
 import prompts
 import chunks
+import refdb
 import research
 import sandbox
 import subagents
@@ -383,6 +384,22 @@ def _gather(more, turn_idx, session_id, run, warnings):
         run.emit("read", paths=paths[:4],
                  chars=sum(len(f.get("text") or "")
                            for f in step["files_read"]))
+    # AND ONE VERB FOR THE DATA THAT CANNOT BE COPIED AT ALL. Every lane above
+    # this one moves bytes: the snapshot builds a payload, `read_file` returns
+    # a file, the index stores bodies. A gigabyte-scale reference database
+    # fits through none of them, and raising the ceilings would write that
+    # gigabyte into a fresh temp directory on every run. The size limits bind
+    # on what a SANDBOX sees, because a run gets a copy — a fetch verb runs
+    # here and copies nothing, so it is not bound. See `refdb`.
+    dbq = more.get("query_db")
+    if isinstance(dbq, dict) and dbq:
+        step["db_query"] = {
+            "database": str(dbq.get("database") or ""),
+            "sql": str(dbq.get("sql") or "")[:2000],
+            **refdb.query(dbq.get("database"), dbq.get("sql"))}
+        run.emit("query_db", database=str(dbq.get("database") or "")[:40],
+                 rows=step["db_query"].get("row_count", 0),
+                 error=str(step["db_query"].get("error") or "")[:120])
     ids = more.get("expand_chunks")
     if isinstance(ids, list) and ids:
         expanded = chunks.expand(session_id, ids)
@@ -600,6 +617,11 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
         # and one that can see the project's own house rules does not have to
         # guess at them.
         "files_the_user_gave_me": workspace.describe(session_id),
+        # NAMED, OR IT DOES NOT EXIST. A query lane whose databases are not
+        # listed is a verb the assistant has no reason to try, and the cost of
+        # naming them is one line per database against a lane that reaches
+        # data no other lane can carry.
+        "reference_databases": refdb.databases(),
         # A DIGEST, not the whole map. `codemap_for` bounded by file count and
         # produced 97 KB for a 115-file upload — enough to break the turn
         # outright, and long before that, enough to spend the context on
@@ -921,6 +943,7 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
     # reproduction in the same turn as the fix is the ordinary case — so the
     # gate has to read a table the experiments above have already written.
     edits = []
+    refused_edits = []
     for spec in (out.get("edit_files") or [])[:8]:
         if not isinstance(spec, dict):
             continue
@@ -951,6 +974,7 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             # turned away. A refusal that is quieter than an acceptance is
             # the exact shape of failure that gets read as success.
             warnings.append(f"edit refused for {path}: {done['why']}")
+            refused_edits.append((done.get("path") or path, done["why"]))
             run.emit("edit", state="refused",
                      path=done.get("path") or path, why=done["why"])
             continue
@@ -1027,6 +1051,28 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                              + digest).strip())
 
     reply = str(out.get("reply") or "").strip()
+
+    # A REFUSAL HAS TO REACH THE SENTENCE A HUMAN READS. The reply is composed
+    # BEFORE this stage runs, so it is written in the belief that every edit
+    # will land — and when the reproduce-before-you-fix gate turns one away,
+    # the refusal reached the trace and the live panel while the reply went on
+    # saying the change was made. Observed 2026-08-05: a reply stating a
+    # section "is now marked WITHDRAWN in place, with the run id on the row"
+    # for an edit that was refused, against a file whose line still read
+    # exactly as before. Nobody reads a trace to check a sentence.
+    #
+    # The comment one stage up says a refusal quieter than an acceptance is
+    # the shape of failure that gets read as success. That was fixed for the
+    # trace and not for the reply, which is the louder of the two. Appended
+    # rather than substituted, on the same reasoning as the subagent digest
+    # above: the model's pre-commit account stays visible beside what actually
+    # happened, because the disagreement is itself the finding.
+    if refused_edits:
+        lines = [f"- `{path}` — {why}" for path, why in refused_edits[:8]]
+        reply = (reply + "\n\n**Not applied.** "
+                 + f"{len(refused_edits)} edit(s) in this turn were refused, "
+                   "so anything above describing them as made is wrong:\n"
+                 + "\n".join(lines)).strip()
 
     # THE LAST POINT A HALT IS HONOURED. Past this line every durable mutation
     # of the turn happens in one transaction, and an interruption inside it
