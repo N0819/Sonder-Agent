@@ -291,6 +291,11 @@ def test_labs_survive_the_turn_that_made_them(lab):
     assert [entry["name"] for entry in listed] == ["one"]
     assert listed[0]["provisioned"] is True
     assert listed[0]["chat_id"] == 1
+    # COUNTED FROM THE DATABASE. The counter this used to report only advanced
+    # on a blocking run, so a lab with two detached turns in it read as zero —
+    # and "no turns yet" is what makes an assistant re-seed a story it has
+    # already played.
+    assert listed[0]["turns_played"] == 0
 
 
 def test_a_finished_run_reports_done_and_carries_its_result(lab):

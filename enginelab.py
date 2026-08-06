@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -436,6 +437,22 @@ print("''' + SENTINEL + ''' " + json.dumps(out))
 # The lane.
 # --------------------------------------------------------------------------
 
+def _turns_in(db_path):
+    """How many turns the lab has actually played, asked of the lab itself."""
+    if not os.path.isfile(db_path):
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        # A lab provisioned but never migrated has no `turns` table. That is
+        # zero turns, not an error worth failing the whole listing over.
+        return 0
+
+
 def labs():
     """Every lab on disk, with whether it has been seeded and what it runs."""
     root = _ensure()
@@ -457,7 +474,12 @@ def labs():
                     "chat_id": meta.get("chat_id"),
                     "story": meta.get("story"),
                     "source": meta.get("source"),
-                    "turns_played": meta.get("turns_played", 0)})
+                    # COUNTED FROM THE DATABASE, not from a counter this lane
+                    # increments. The counter only advanced on a blocking run,
+                    # so a lab with two detached turns in it reported zero —
+                    # and "no turns yet" is the one reading that makes an
+                    # assistant re-seed a story it has already played.
+                    "turns_played": _turns_in(db_path)})
     return out
 
 
