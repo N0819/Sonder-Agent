@@ -1190,3 +1190,77 @@ def test_an_edit_records_the_digest_of_both_sides(temp_db, tmp_path):
     assert recalled, "the edit was not witnessed at all"
     assert out["before_sha256"][:16] in recalled[0]["content"]
     assert out["after_sha256"][:16] in recalled[0]["content"]
+
+
+def _versioned(hid, digest, guard, want):
+    return coding.run_experiment(
+        hid, turn_idx=1,
+        source=f"print('PRECONDITION db.py {digest}')\nprint('GUARD={guard}')\n",
+        expect={"exit_zero": True, "stdout_has": f"GUARD={want}",
+                "precondition": {"db.py": digest}})
+
+
+def test_two_methods_disagreeing_about_one_claim_become_a_dispute(temp_db):
+    """The measurement that forced this: 141 experiments, 141 distinct
+    hypotheses, 141 distinct digests, and three mechanisms at zero fires
+    against ZERO opportunities. Each run minted its own hypothesis from its
+    own text, so no two runs ever shared an id, so opposing stances could not
+    meet and `_detect_dispute` could not be reached. Not dead — never
+    eligible. Two probes of one claim are worded differently because each is
+    phrased in the vocabulary of its instrument, so no text match pairs them."""
+    hyp = research.open_hypothesis("does f() return 1?", turn_idx=1)
+    coding.run_experiment(hyp["id"], source="print('V=1')\n", turn_idx=1,
+                          expect={"exit_zero": True, "stdout_has": "V=1"})
+    coding.run_experiment(hyp["id"], source="raise SystemExit(3)\n",
+                          turn_idx=1, expect={"exit_zero": True})
+
+    after = research.get_hypothesis(hyp["id"])
+    assert after["status"] == "disputed", after
+    assert after["dispute"]["supporting"] and after["dispute"]["contradicting"]
+    assert 0.35 <= after["confidence"] <= 0.65, after["confidence"]
+
+
+def test_runs_against_two_versions_are_not_a_disagreement(temp_db):
+    """Version A failing and version B passing is a repair working. Recorded
+    as a dispute it becomes "sources disagree" — a number claiming a state of
+    knowledge nobody has, which is the exact pathology the dispute machinery
+    exists to prevent. It matters disproportionately because this mechanism
+    had never fired: a first fire that was a false positive would teach the
+    band to mean nothing before it ever meant anything."""
+    hyp = research.open_hypothesis("is the guard in db.py?", turn_idx=1)
+    assert _versioned(hyp["id"], "8b3bd06e239e55cf", "False",
+                      "True")["outcome"] == coding.OUTCOME_REFUTED
+    assert _versioned(hyp["id"], "ab6acd2e6f8847d2", "True",
+                      "True")["outcome"] == coding.OUTCOME_CONFIRMED
+
+    import db
+    after = research.get_hypothesis(hyp["id"])
+    assert after["status"] != "disputed", after["dispute"]
+    stances = [r["stance"] for r in db.q(
+        "SELECT stance FROM evidence WHERE hypothesis_id=? ORDER BY id",
+        (hyp["id"],))]
+    assert stances == ["contradicts", "context"], stances
+
+
+def test_the_same_version_twice_still_disputes(temp_db):
+    """The control the guard above needs. A guard that suppressed every
+    disagreement would look identical in the record to one that suppressed
+    only cross-version ones, and would silently restore the zero it was
+    written to end."""
+    hyp = research.open_hypothesis("control: one version", turn_idx=1)
+    _versioned(hyp["id"], "8b3bd06e239e55cf", "False", "True")
+    _versioned(hyp["id"], "8b3bd06e239e55cf", "True", "True")
+    assert research.get_hypothesis(hyp["id"])["status"] == "disputed"
+
+
+def test_an_abbreviated_digest_is_not_a_different_version(temp_db):
+    """`precondition` accepts a sha256 or its first 16 characters. If the two
+    spellings of one digest read as two versions the guard inverts, and every
+    abbreviation manufactures the suppression it exists to withhold."""
+    full = "8b3bd06e239e55cf423fda06ff79ffa44582159796ced9bf035cd79c08f47dc7"
+    assert not coding._measured_another_version(
+        1, {"precondition": {"db.py": full}}) , "no prior runs to compare"
+    hyp = research.open_hypothesis("abbreviation check", turn_idx=1)
+    _versioned(hyp["id"], full[:16], "False", "True")
+    assert not coding._measured_another_version(
+        hyp["id"], {"precondition": {"db.py": full}})

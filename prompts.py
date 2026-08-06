@@ -115,6 +115,7 @@ Return ONLY a JSON object:
                  "search": "a web query", "why": "..."}},
   "dispute": {{"memory_ref": "event:...", "reading": "what it means now"}},
   "experiment": [{{"hypothesis": "the question the run settles",
+                  "hypothesis_id": 7,
                   "source": "the python to run — OR omit it and give `command`",
                   "command": ["python3", "-m", "pytest", "tests/", "-q"],
                   "expect": {{"exit_zero": true, "stdout_has": "..."}},
@@ -190,6 +191,31 @@ enforces whatever you write:
   tell a fix for a defect from a fix for nothing.
 Files the user uploaded are already in the sandbox workspace, so you can run
 against them by name; `files_the_user_gave_me` lists what is there.
+
+ASKING ONE QUESTION TWICE. By default each experiment opens its own
+hypothesis from the text you give it, so two runs are two questions. Name
+`hypothesis_id` — an id you can see in `open_research`, never a guess — when
+this run measures a claim ALREADY under investigation. Then both runs land on
+one hypothesis, and if they disagree, that disagreement is recorded as a
+dispute rather than as two unrelated findings at different confidences.
+
+Attach it when the METHOD varies and the claim does not: the first probe read
+a return value, this one reads an exit code; the first was graded by a suite
+that swallowed stdout, this one writes counters to a collected file. Two
+methods that disagree about one claim is the most informative result available
+to you, and it is reachable no other way — a re-run of the SAME method can
+only ever agree with itself.
+
+Leave it out when the object moved. A run against a file whose digest has
+changed is a first ask about a different thing, not a second ask about the
+same one, and it should open its own hypothesis. Leave it out, too, when you
+would only be re-running an identical deterministic probe to raise a number:
+that reports sample size while claiming to report independence.
+
+The id is YOUR judgement about sameness and the engine cannot check it. A row
+attached to the wrong hypothesis is indistinguishable afterwards from one
+attached correctly — there is no later signal that catches it — so attach only
+when you can say which claim both runs measure.
 
 PYTEST IS AVAILABLE. Name it in `command` — ["python3", "-s", "-m", "pytest",
 "-q", "--no-header"] — and the sandbox makes it importable and reads its exit

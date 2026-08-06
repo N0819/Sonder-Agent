@@ -844,7 +844,48 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             missing = "hypothesis" if not question else "source or command"
             warnings.append(f"dropped an experiment with no {missing}")
             continue
-        hyp = research.open_hypothesis(question, turn_idx, session_id)
+        # ATTACHING A RUN TO A HYPOTHESIS THAT ALREADY EXISTS, which is the
+        # only way two runs can ever disagree about one claim.
+        #
+        # Measured before this existed: 141 experiments, 141 distinct
+        # hypotheses, 141 distinct digests, and THREE mechanisms sitting at
+        # zero fires against zero opportunities — `_detect_dispute` (needs
+        # opposing stances on one hid), `record_dispute_note`'s
+        # non-determinism branch (needs a repeated digest, and the hid is
+        # inside the digest), and evidence accumulation itself. None was dead.
+        # None had ever been eligible. All three are downstream of this one
+        # line minting a fresh id from the question text every run.
+        #
+        # Two probes of ONE claim are worded differently because each is
+        # phrased in the vocabulary of its own instrument, so no text match
+        # can pair them. The id is the only lever that says "these measure the
+        # same thing" — and it is the MODEL's judgement, deliberately: the
+        # exact-text dedup in `open_hypothesis` refuses fuzzy matching on
+        # measured grounds, and inventing a threshold here would be the same
+        # mistake with an engine's authority behind it.
+        #
+        # ONLY AN ID ALREADY SHOWN IN `open_research`. A guessed integer is
+        # the ritual the whole gate discipline exists to prevent, and an
+        # attached run is the one place where a wrong id is invisible
+        # afterwards: a misfiled row reads exactly like a correct one.
+        attached = None
+        want = spec.get("hypothesis_id")
+        if want is not None:
+            try:
+                offered = research.get_hypothesis(int(want))
+            except (TypeError, ValueError):
+                offered = None
+            if offered is None:
+                warnings.append(f"experiment named hypothesis {want}, which "
+                                "does not exist — opened a new one instead")
+            elif str(offered["status"] or "") not in ("open", "disputed"):
+                warnings.append(f"experiment named hypothesis {want}, which "
+                                f"is {offered['status']} — opened a new one "
+                                "instead")
+            else:
+                attached = offered
+        hyp = attached or research.open_hypothesis(question, turn_idx,
+                                                   session_id)
         # The user's uploaded files are the working set: "run the tests in
         # this zip" is the same workspace as "here is a zip".
         #

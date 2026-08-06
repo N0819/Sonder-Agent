@@ -796,3 +796,46 @@ def test_the_trace_says_whether_an_edit_was_gated_at_all(temp_db, tmp_path):
     # The unchecked path is named as such rather than looking like the other.
     assert by_path["notes.md"]["gated_on"] is None
     assert "no reproduction required" in by_path["notes.md"]["gate"]
+
+
+def test_an_experiment_can_attach_to_a_hypothesis_already_open(temp_db,
+                                                               tmp_path):
+    """Without this, `open_hypothesis` mints a fresh id from each run's own
+    text and no two runs ever share one — which is why three mechanisms sat at
+    zero fires against zero opportunities. The id is the only lever that says
+    two differently-worded probes measure one claim."""
+    import research
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    hyp = research.open_hypothesis("does f() return 1?", turn_idx=1)
+
+    _stub(respond={"reply": "second method",
+                   "experiment": [{"hypothesis": "measured by exit code",
+                                   "hypothesis_id": hyp["id"],
+                                   "source": "raise SystemExit(3)\n",
+                                   "expect": {"exit_zero": True}}]})
+    out = pipeline.run_turn("check it another way")
+
+    assert out["trace"]["experiments"][0]["hypothesis_id"] == hyp["id"]
+    assert research.list_hypotheses(status="open", limit=50)
+    got = [h["id"] for h in research.list_hypotheses(limit=50)]
+    assert got.count(hyp["id"]) == 1 and len(got) == 1, (
+        "attaching minted a second hypothesis anyway: %r" % got)
+
+
+def test_an_experiment_naming_an_unknown_hypothesis_says_so(temp_db, tmp_path):
+    """A guessed integer is the ritual the gate discipline exists to prevent,
+    and an attached run is where a wrong id is invisible afterwards — a
+    misfiled row reads exactly like a correct one. Falling back silently would
+    make the guess look honoured."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    _stub(respond={"reply": "x",
+                   "experiment": [{"hypothesis": "a fresh question",
+                                   "hypothesis_id": 9999,
+                                   "source": "print('ok')\n",
+                                   "expect": {"stdout_has": "ok"}}]})
+    out = pipeline.run_turn("run it")
+    assert any("9999" in w and "does not exist" in w
+               for w in out["trace"]["warnings"]), out["trace"]["warnings"]
+    assert out["trace"]["experiments"][0]["hypothesis_id"] != 9999

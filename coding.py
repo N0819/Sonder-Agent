@@ -648,6 +648,29 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
 
     stance = {OUTCOME_CONFIRMED: "supports",
               OUTCOME_REFUTED: "contradicts"}.get(outcome, "context")
+    # A DISAGREEMENT ACROSS VERSIONS IS NOT A DISAGREEMENT.
+    #
+    # Now that a run can attach to an existing hypothesis, two runs on one hid
+    # can carry opposing stances — which is the point, and which reaches
+    # `_detect_dispute`. But that function takes ANY supports/contradicts pair
+    # and pins confidence into the dispute band; it does not ask whether the
+    # two runs measured the same object. Version A passing and version B
+    # failing is a repair working, and recording it as "sources disagree"
+    # manufactures the exact pathology the dispute machinery exists to
+    # prevent: a number claiming a state of knowledge nobody has.
+    #
+    # It matters disproportionately here because this mechanism has NEVER
+    # fired. Its first fire being a false positive would teach the band to
+    # mean nothing before it ever meant anything.
+    #
+    # `precondition` already carries the version each prediction was written
+    # against, so no new vocabulary is needed — only the comparison.
+    if _measured_another_version(hypothesis_id, expect):
+        stance = "context"
+        observation += ("\n[stance: context — an earlier run on this "
+                        "hypothesis declared a different precondition digest, "
+                        "so these two measured different versions and their "
+                        "disagreement is not one]")
     evidence = research.record_evidence(
         hypothesis_id,
         url=_experiment_ref(digest),
@@ -667,6 +690,41 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     return {"outcome": outcome, "why": why, "result": result,
             "evidence": evidence, "repeated": repeated,
             "shadowed": shadowed}
+
+
+def _measured_another_version(hypothesis_id, expect):
+    """Did an earlier run on this hypothesis declare a DIFFERENT version of
+    some file this run also pins?
+
+    Compared by common prefix, because `precondition` accepts a sha256 or its
+    first 16 characters and the two spellings of one digest must not read as
+    two versions — that would invert the guard, turning every abbreviation
+    into a manufactured disagreement.
+
+    Only paths named by BOTH runs are compared. A run that pins a file the
+    other never mentioned has said nothing about it, and treating silence as
+    a version claim would make the guard fire on almost every pair.
+    """
+    mine = (expect or {}).get("precondition")
+    if not isinstance(mine, dict) or not mine:
+        return False
+    for row in q("SELECT expect FROM experiments WHERE hypothesis_id=?",
+                 (hypothesis_id,)) or []:
+        try:
+            theirs = (json.loads(row["expect"] or "{}") or {}).get(
+                "precondition")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(theirs, dict):
+            continue
+        for path, want in mine.items():
+            had = theirs.get(path)
+            if not had or not want:
+                continue
+            n = min(len(str(had)), len(str(want)))
+            if str(had)[:n].lower() != str(want)[:n].lower():
+                return True
+    return False
 
 
 def _row_shows_failure(row, expect):
