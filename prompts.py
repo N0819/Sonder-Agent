@@ -201,6 +201,22 @@ The file predicates read files THE RUN LEFT BEHIND, so "the patch applied and
 the file now reads X" is checkable directly instead of via a print statement.
 A prediction about a file the run never wrote is inconclusive, not refuted.
 
+`precondition` {{"path/to.py": "<sha256 or its first 16 chars>"}} anchors a
+prediction to the VERSION it was written against. Whenever a prediction names
+a line number, an offset, or anything else that moves when a file is edited,
+state the digest you derived it from and have the run print
+`PRECONDITION <path> <sha256>`. If the file has changed since, the grade is
+inconclusive rather than refuted — the run measured a different object that
+shares a filename, so it never tested the question.
+
+This exists because a line number is a coordinate IN A VERSION, and the
+version is part of the coordinate. Predictions written against `workspace.py`
+line 816 — read from printed bytes one turn earlier — were graded refuted
+after the file gained 28 lines from outside the loop. The measurement was
+right, the verdict was about nothing, and a sound finding was withdrawn on the
+strength of it. Printing the bytes does not protect you here: the bytes were
+printed, and then the ground moved.
+
 `collect` asks for a file back WITHOUT predicting its contents — the case
 where the number you want is the thing you do not yet know. Use it whenever a
 run writes its answer to a file: a count, a roster, a junit report. Predicted

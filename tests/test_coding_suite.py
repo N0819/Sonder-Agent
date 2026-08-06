@@ -107,6 +107,42 @@ class TestJudgingIsMechanical:
 
         assert coding.judge(result, {"exit_zero": True})[0] == "inconclusive"
 
+    def test_a_prediction_whose_file_moved_under_it_was_never_tested(self):
+        """Turn 130: predictions written against `workspace.py` line 816 — read
+        from printed bytes one turn earlier — were graded REFUTED after the file
+        gained 28 lines from outside the loop. The run measured 816 correctly;
+        it was a different object by then. A sound structural finding was
+        withdrawn on the strength of that verdict, and printing the bytes could
+        not have prevented it, because the bytes had been printed."""
+        result = {"ok": True, "exit_code": 0, "timed_out": False, "stderr": "",
+                  "stdout": "PRECONDITION lib.py cafe1234deadbeef\nX816=12\n"}
+        expect = {"stdout_has": "X816=8",
+                  "precondition": {"lib.py": "0000ffff11112222"}}
+        outcome, why = coding.judge(result, expect)
+        assert outcome == "inconclusive", "not refuted — it tested nothing"
+        assert "stale anchor" in why
+
+    def test_the_same_prediction_is_graded_when_the_file_held_still(self):
+        """The gate must not swallow honest refutations. An unchanged anchor
+        leaves the predicate to be scored exactly as before."""
+        result = {"ok": True, "exit_code": 0, "timed_out": False, "stderr": "",
+                  "stdout": "PRECONDITION lib.py cafe1234deadbeef\nX816=12\n"}
+        expect = {"stdout_has": "X816=8",
+                  "precondition": {"lib.py": "cafe1234"}}
+        assert coding.judge(result, expect)[0] == "refuted", "prefixes compare"
+
+    def test_a_run_that_never_reported_a_digest_is_not_treated_as_agreement(self):
+        """Silence is not agreement, which is the entire failure this gate
+        exists to catch. A run that could not check its anchor has not
+        established that the anchor held."""
+        result = {"ok": True, "exit_code": 0, "timed_out": False, "stderr": "",
+                  "stdout": "X816=8\n"}
+        outcome, why = coding.judge(
+            result, {"stdout_has": "X816=8",
+                     "precondition": {"lib.py": "cafe1234"}})
+        assert outcome == "inconclusive"
+        assert "never reported a digest" in why
+
 
 class TestTheLoopEndToEnd:
 

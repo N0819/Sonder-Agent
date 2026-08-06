@@ -199,6 +199,41 @@ def _expected_paths(expect):
     return sorted(set(paths))
 
 
+def _stale_anchor(result, precondition):
+    """Has the file this prediction was anchored to changed under it?
+
+    `precondition` is `{path: sha256-or-prefix}` — the digest the prediction
+    was derived under. The run recomputes it and prints
+    `PRECONDITION <path> <sha>` on stdout; anything that does not report back
+    is a run that could not check, which is INCONCLUSIVE rather than a pass.
+    Silence is not agreement — that is the whole failure this exists to catch.
+
+    Prefixes compare, so a probe emitting the first sixteen hex characters is
+    as good as one emitting all sixty-four. The comparison is on content, not
+    mtime or turn index: mtime is a fact about the filesystem and turn index a
+    fact about the loop, and neither is a fact about the bytes."""
+    if not isinstance(precondition, dict) or not precondition:
+        return ""
+    seen = {}
+    for line in (result.get("stdout") or "").splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 3 and parts[0] == "PRECONDITION":
+            seen[" ".join(parts[1:-1])] = parts[-1].lower()
+    for path, want in precondition.items():
+        path, want = str(path), str(want).strip().lower()
+        got = seen.get(path)
+        if got is None:
+            return (f"the run never reported a digest for {path!r}, so the "
+                    "anchor this prediction was written against could not be "
+                    "checked — print `PRECONDITION <path> <sha256>`")
+        if not (got.startswith(want) or want.startswith(got)):
+            return (f"stale anchor: {path!r} was {want[:16]}… when this "
+                    f"prediction was written and is {got[:16]}… now, so the "
+                    "run measured a different object and did not test the "
+                    "hypothesis")
+    return ""
+
+
 def judge(result, expect):
     """Did the observation match the prediction?
 
@@ -286,6 +321,26 @@ def judge(result, expect):
         return (OUTCOME_INCONCLUSIVE,
                 "the harness failed before the hypothesis was tested: "
                 + (result.get("stderr") or "").strip().splitlines()[-1][:160])
+    # A LINE NUMBER IS A COORDINATE IN A VERSION, AND THE VERSION IS PART OF
+    # THE COORDINATE. Checked before any predicate is scored, because a run
+    # against a file that moved did not test the hypothesis — it tested a
+    # different object that shares a filename, and grading it either way is a
+    # verdict about nothing.
+    #
+    # Turn 130 is the worked example. Predictions were written against
+    # workspace.py line 816, read from printed bytes at turn 129. The file
+    # gained 28 lines between the two turns, from outside the loop entirely.
+    # The run then measured line 816 correctly, the grader called it REFUTED,
+    # and a sound structural finding was withdrawn on the strength of it. The
+    # existing defence — print the bytes, never trust the index — could not
+    # reach this: the bytes WERE printed, one turn before the ground moved.
+    #
+    # Schema, not discipline (AGENTS.md: a guard that must be remembered will
+    # be forgotten). Restating a digest by hand would hold for a few turns and
+    # lapse on a busy one, which is the turn it is most needed.
+    stale = _stale_anchor(result, expect.get("precondition"))
+    if stale:
+        return OUTCOME_INCONCLUSIVE, stale
     checks = []
     if "exit_zero" in expect:
         want = bool(expect["exit_zero"])

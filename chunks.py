@@ -369,6 +369,17 @@ def ingest_workspace(session_id=WORKSPACE, budget=INGEST_CHAR_BUDGET):
     live = set()
     for entry in workspace.list_files(session_id):
         path = entry["path"]
+        # A RUN'S OWN OUTPUT IS NOT THE PROJECT'S SOURCE. `_runs/` holds what
+        # an experiment asked to collect, and a run may collect a `.py` or a
+        # `.json` as readily as a `.txt` — which would then be indexed as if
+        # the project contained it, and answer a later "where is this defined"
+        # with a file the project never had. Recorded rather than dropped in
+        # silence, for the same reason as everything else in this loop.
+        if path.replace("\\", "/").split("/")[0] == workspace.RUN_OUTPUT_DIR:
+            skipped.append({"path": path,
+                            "why": "a previous run's collected output, not "
+                                   "project source — read it directly"})
+            continue
         language = codemap.language_of(os.path.basename(path))
         if not language:
             # Recorded, not skipped in silence. A reader comparing "56 files"
