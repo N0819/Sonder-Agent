@@ -734,6 +734,22 @@ WITHHELD_MANIFEST = "_withheld_from_this_workspace.md"
 # answers "is this subtree here?", and a bound on THAT is what let a whole
 # `tools/` directory vanish from a list of what had vanished.
 WITHHELD_DETAIL_CHARS = 40_000
+# Where a run's `collect`ed files land so they outlive the sandbox that wrote
+# them. THE GATHER WAS WIRED TO THE GRADER AND NOWHERE ELSE: `sandbox.run`
+# read every collected path into `files_after`, `judge` consulted it to score
+# file predicates, and `pipeline` then took exit_code, seconds, stdout and
+# stderr from the result and dropped the rest on the floor. So a run could be
+# graded against a file that the thing which asked for it could never read.
+# Observed across turns 125-127: three consecutive runs requested files,
+# three times the grader opened them and scored them, three times the caller
+# was told nothing arrived — and it correctly recorded the lane as an
+# instrument fault and started budgeting fourteen runs to read one 6 KB
+# function through stdout instead.
+RUN_OUTPUT_DIR = "_runs"
+# Newest run folders kept. Old ones are pruned rather than accumulating: this
+# is a delivery buffer, not an archive, and the experiments table already
+# holds the record of what each run did.
+RUN_OUTPUT_KEEP = 20
 
 
 # THE BYTE CEILING IS THE HONEST CONSTRAINT; the file count was costing
@@ -810,6 +826,18 @@ def snapshot_for_sandbox(session_id, max_bytes=SNAPSHOT_MAX_BYTES,
                 (".md", ".markdown", ".rst", ".txt")):
             withheld.append((path, "recorded run — only prose is taken from "
                                    "an archive folder"))
+            continue
+        # A RUN'S OWN OUTPUT MUST NOT COME BACK AS THE NEXT RUN'S INPUT. These
+        # files exist so the caller can read them through the file lane; the
+        # sandbox is where they came FROM. Feeding them back would grow the
+        # payload every experiment and let a probe find its own last answer
+        # lying in the tree, which is indistinguishable from measuring it
+        # again. Named here rather than skipped silently, so a reader looking
+        # for them in the sandbox is told where they actually live.
+        if path.replace("\\", "/").split("/")[0] == RUN_OUTPUT_DIR:
+            withheld.append((path, f"a previous run's collected output — read "
+                                   f"it from {RUN_OUTPUT_DIR}/ in the "
+                                   f"workspace, not from here"))
             continue
         full = os.path.join(root, path)
         try:
@@ -902,3 +930,57 @@ def _withheld_note(delivered, withheld):
                      "roll-up above is complete, so check it before "
                      "concluding anything is absent")
     return "\n".join(lines) + "\n"
+
+
+def store_run_output(session_id, run_id, files):
+    """Persist what a run was asked to `collect`, and return where it went.
+
+    The sandbox is a throwaway directory — that is the point of it — so a file
+    a run writes is gone the moment the run ends. `collect` existed to carry
+    named files back out, and carried them only as far as the grader. This is
+    the other half: the same contents land in the workspace, under the file
+    lane the caller already reads, and the returned path is what tells it
+    where to look.
+
+    Returns `{"dir": relative_dir, "files": {name: bytes}}`, or None when the
+    run collected nothing — an absent directory is the honest signal for a run
+    that produced no files, and an empty one would read as "it ran and gave me
+    nothing" when the truth is "it never wrote anything to give"."""
+    if not files:
+        return None
+    root = session_root(session_id)
+    tag = re.sub(r"[^A-Za-z0-9_.-]", "", str(run_id))[:32] or "run"
+    rel = f"{RUN_OUTPUT_DIR}/{tag}"
+    target = os.path.join(root, RUN_OUTPUT_DIR, tag)
+    os.makedirs(target, exist_ok=True)
+    written = {}
+    for name, body in files.items():
+        # The same guard the write side uses everywhere else. A collected path
+        # is a path the MODEL chose, so it is untrusted exactly like a path in
+        # `files` — and it has already been through one path check on the way
+        # out of the sandbox, which is not a reason to skip the one on the way
+        # in. Two spellings of one rule is how the workspace got a zip-slip.
+        safe = safe_name(os.path.basename(str(name)))
+        if not safe:
+            continue
+        data = body if isinstance(body, bytes) else str(body).encode("utf-8")
+        with open(os.path.join(target, safe), "wb") as handle:
+            handle.write(data)
+        written[safe] = len(data)
+    _prune_run_outputs(root)
+    return {"dir": rel, "files": written} if written else None
+
+
+def _prune_run_outputs(root, keep=RUN_OUTPUT_KEEP):
+    """Keep the newest `keep` run folders. A delivery buffer that only grows
+    is a workspace that quietly stops being the user's."""
+    base = os.path.join(root, RUN_OUTPUT_DIR)
+    try:
+        names = [n for n in os.listdir(base)
+                 if os.path.isdir(os.path.join(base, n))]
+    except OSError:
+        return
+    names.sort(key=lambda n: os.path.getmtime(os.path.join(base, n)),
+               reverse=True)
+    for name in names[keep:]:
+        shutil.rmtree(os.path.join(base, name), ignore_errors=True)

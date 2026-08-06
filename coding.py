@@ -47,6 +47,7 @@ import time
 import memory
 import research
 import sandbox
+import workspace
 from db import q, qi
 
 # A prediction is met, contradicted, or the run never got far enough to say.
@@ -372,7 +373,7 @@ def judge(result, expect):
 
 def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                    files=None, command=None, timeout=None, note="",
-                   cwd="", collect=()):
+                   cwd="", collect=(), session_id=None):
     """One experiment: predict, run, judge, record as evidence.
 
     Returns {outcome, why, result, evidence, repeated}. The evidence row is an
@@ -443,6 +444,25 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     outcome, why = judge(result, expect)
     digest = _digest(hypothesis_id, source, command, expect, payload)
     observation = _observation_text(result)
+
+    # AND NOW SAY WHERE THEY WENT. Gathering the files and telling nobody is
+    # what made `collect` look like a broken transport for three turns: the
+    # grader scored predicates against contents the caller was never shown,
+    # so "the run left no counts.txt to check" and "the file is here and you
+    # cannot see it" were the same observation. The location goes on the END
+    # of the text because the excerpt that gets read back keeps ~375
+    # characters of tail against ~187 of head — the last line survives, the
+    # middle does not.
+    stored = None
+    if session_id is not None and (result or {}).get("files_after"):
+        try:
+            stored = workspace.store_run_output(session_id, digest,
+                                                result["files_after"])
+        except OSError as exc:
+            observation += f"\n[collected files could not be stored: {exc}]"
+    if stored:
+        names = ", ".join(sorted(stored["files"]))
+        observation += f"\ncollected → {stored['dir']}/ ({names})"
 
     # NON-DETERMINISM IS A FINDING. The same experiment reaching a different
     # outcome than last time does not mean the newer answer is right; it means

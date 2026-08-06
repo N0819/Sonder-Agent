@@ -814,7 +814,8 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                 note=str(spec.get("note") or "")[:200],
                 cwd=str(spec.get("cwd") or ""),
                 collect=[str(p) for p in (spec.get("collect") or [])
-                         if isinstance(spec.get("collect"), list)])
+                         if isinstance(spec.get("collect"), list)],
+                session_id=session_id)
         except Exception as exc:
             run.emit("experiment", state="the harness itself failed",
                      hypothesis=question[:200], detail=str(exc)[:200])

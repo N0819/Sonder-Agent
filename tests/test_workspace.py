@@ -151,6 +151,49 @@ def test_a_binary_file_travels_whole_rather_than_being_dropped(ws):
     assert snapshot["state.db"] == b"SQLite format 3\x00\x01\x02"
 
 
+def test_a_runs_collected_files_survive_the_sandbox_that_wrote_them(ws):
+    """`collect` gathered files and handed them to the grader alone. Three
+    consecutive runs (turns 125-127) were SCORED against files their caller
+    was then told had never arrived — so "the run left no counts.txt to check"
+    and "it is here and you cannot see it" read identically, and the caller
+    started budgeting fourteen runs to read one 6 KB function through stdout
+    instead."""
+    out = workspace.store_run_output(1, "abc123", {"counts.txt": "FNF=0\n",
+                                                   "blob.bin": b"\x00\x01"})
+    assert out["dir"] == "_runs/abc123"
+    assert workspace.read_file("_runs/abc123/counts.txt", 1)["text"] == "FNF=0\n"
+    listed = {f["path"] for f in workspace.list_files(1)}
+    assert "_runs/abc123/counts.txt".replace("/", os.sep) in listed
+
+
+def test_a_run_never_reads_its_own_last_answer_back_as_input(ws):
+    """Collected output lands in the workspace, and the workspace is what the
+    next sandbox is built from. Fed back, a probe finds its own previous
+    answer lying in the tree — which is indistinguishable from measuring it
+    again — and the payload grows by one run's output every experiment."""
+    workspace.store_upload(1, "live.py", b"x = 1")
+    workspace.store_run_output(1, "abc123", {"counts.txt": "FNF=0\n"})
+    snapshot = workspace.snapshot_for_sandbox(1)
+    assert "live.py" in snapshot
+    assert not [p for p in snapshot if p.startswith(workspace.RUN_OUTPUT_DIR)]
+    # Named, not silently skipped: a reader hunting for it is told where it is.
+    assert "counts.txt" in snapshot[workspace.WITHHELD_MANIFEST]
+
+
+def test_a_collected_path_cannot_climb_out_of_the_run_folder(ws):
+    """A collected name is a path the MODEL chose. It has been through one
+    guard on the way out of the sandbox, which is not a reason to skip the one
+    on the way in — two spellings of a rule is how the workspace got a
+    zip-slip in the first place."""
+    workspace.store_run_output(1, "abc123", {"../../escape.txt": "no"})
+    assert not os.path.exists(os.path.join(
+        workspace.session_root(1), "..", "..", "escape.txt"))
+    listed = {os.path.basename(f["path"]) for f in workspace.list_files(1)}
+    assert "escape.txt" not in listed or all(
+        f["path"].startswith(workspace.RUN_OUTPUT_DIR)
+        for f in workspace.list_files(1))
+
+
 def test_a_binary_too_large_to_carry_is_named_rather_than_dropped(ws):
     """Silence is the defect, not the limit."""
     workspace.store_upload(1, "huge.db", b"\x00" * 4096)
