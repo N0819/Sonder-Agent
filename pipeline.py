@@ -1074,6 +1074,28 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                    "so anything above describing them as made is wrong:\n"
                  + "\n".join(lines)).strip()
 
+    # AND AN EXPERIMENT CANNOT SEE AN EDIT FROM ITS OWN TURN. Stage 4a runs
+    # before 4c, deliberately: the reproduce-before-you-fix gate reads the
+    # experiments table, so the reproduction has to be written before the
+    # repair it justifies. The consequence is that a run written to VERIFY an
+    # edit measures the tree as it stood before it — and comes back refuted
+    # for a repair that worked. Observed 2026-08-05: a fixture repair that
+    # took a suite from 31 failed to 0 was graded refuted twice in the same
+    # turn, once on a tree digest that had not moved yet and once on a failure
+    # count taken before the fix was on disk.
+    #
+    # This is not cosmetic. A refutation moves confidence DOWN through the
+    # same bounded arithmetic a real one does, so an ordering artefact
+    # silently argues against a correct repair in the permanent record. Said
+    # in the reply because that is where it can still be read as a caveat
+    # rather than mined out of a trace later.
+    if edits and experiments:
+        reply = (reply + f"\n\n**Ordering caveat.** {len(experiments)} "
+                 f"experiment(s) and {len(edits)} edit(s) ran this turn, and "
+                 "experiments run FIRST — so any run written to check an edit "
+                 "measured the tree as it stood BEFORE it. Verify in the next "
+                 "turn; a refutation here may be about the old bytes.").strip()
+
     # THE LAST POINT A HALT IS HONOURED. Past this line every durable mutation
     # of the turn happens in one transaction, and an interruption inside it
     # would leave the ordinal consumed with the turn half-written — precisely

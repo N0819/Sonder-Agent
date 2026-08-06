@@ -326,6 +326,45 @@ def test_a_refused_edit_corrects_the_reply_that_claimed_it_landed(temp_db,
     assert "WITHDRAWN in place" in out["reply"]
 
 
+def test_a_turn_that_edits_and_runs_says_the_run_came_first(temp_db, tmp_path):
+    """Stage 4a runs before 4c, because the reproduce-before-you-fix gate
+    reads the experiments table and the reproduction has to precede the repair
+    it justifies. So a run written to VERIFY an edit measures the tree as it
+    stood before it. A fixture repair that took a suite from 31 failed to 0
+    was graded refuted twice in the same turn on exactly that — and a
+    refutation moves confidence DOWN through the same arithmetic a real one
+    does, so the artefact argues against a correct repair in the record."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "notes.md", b"before\n")
+
+    _stub(respond={
+        "reply": "Edited it and verified.",
+        "experiment": [{"hypothesis": "does the edit show up?",
+                        "source": "print('checked')\n",
+                        "expect": {"stdout_has": "checked"}}],
+        "edit_files": [{"path": "notes.md", "contents": "after\n",
+                        "why": "the user asked"}]})
+    out = pipeline.run_turn("change it and check")
+
+    assert workspace.read_file("notes.md", 1)["text"] == "after\n"
+    assert "Ordering caveat" in out["reply"], out["reply"]
+    assert "BEFORE it" in out["reply"]
+
+
+def test_a_turn_that_only_edits_gets_no_ordering_caveat(temp_db, tmp_path):
+    """A caveat appended to every turn is a caveat nobody reads. It has to
+    mean that a run and an edit actually shared a turn."""
+    import workspace
+    workspace.configure(str(tmp_path / "workspaces"))
+    workspace.store_upload(1, "notes.md", b"before\n")
+    _stub(respond={"reply": "Edited it.",
+                   "edit_files": [{"path": "notes.md", "contents": "after\n",
+                                   "why": "asked"}]})
+    out = pipeline.run_turn("change it")
+    assert "Ordering caveat" not in out["reply"]
+
+
 def test_a_reply_whose_edits_all_landed_is_left_alone(temp_db, tmp_path):
     """A correction appended to every turn is a correction nobody reads. It
     has to mean that something was actually turned away."""
