@@ -439,6 +439,58 @@ def test_the_experiment_record_says_when_its_source_is_truncated(temp_db):
     assert row["source_chars"] > len(row["source"]), "the record looks whole"
 
 
+def test_a_run_whose_program_lived_in_files_still_records_what_ran(temp_db):
+    """A run that puts its whole program in `files` stored an EMPTY source and
+    `source_chars=0`, so the row named a command, a prediction and an outcome
+    and nothing said what the program was. The measurement run that classified
+    the engine's 31 failures was unreproducible from its own record the moment
+    the sandbox was gone. `source_chars=0` was not a lie — it truthfully
+    reported `len(source)` for a run that had no `source` — which is what made
+    the row read as an experiment with no program at all."""
+    from db import q
+    hyp = research.open_hypothesis("does a plugin run?", turn_idx=1)
+    coding.run_experiment(
+        hyp["id"],
+        files={"probe.py": "import helper\nprint(helper.NAME)\n",
+               "helper.py": "NAME = 'from-a-file'\n"},
+        command=[sys.executable, "-s", "probe.py"],
+        expect={"stdout_has": "from-a-file"}, turn_idx=1)
+    row = q("SELECT source, source_chars, outcome FROM experiments "
+            "WHERE hypothesis_id=?", (hyp["id"],), one=True)
+    assert row["outcome"] == coding.OUTCOME_CONFIRMED, row["outcome"]
+    assert row["source_chars"] > 0, "the row says the run had no program"
+    assert "probe.py" in row["source"] and "helper.py" in row["source"]
+    assert "NAME = 'from-a-file'" in row["source"], "a body went unrecorded"
+
+
+def test_a_program_written_straight_into_main_py_is_not_turned_away(temp_db):
+    """The guard demanded `source` or an explicit command, so a caller that
+    put its program into `files["main.py"]` — the very file the default
+    command runs — was told it had no program to run, with main.py sitting in
+    the payload. The check named the parameter instead of the thing."""
+    from db import q
+    hyp = research.open_hypothesis("which file ran?", turn_idx=1)
+    out = coding.run_experiment(
+        hyp["id"], files={"main.py": "print('the one that ran')\n"},
+        expect={"stdout_has": "the one that ran"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+    row = q("SELECT source FROM experiments WHERE hypothesis_id=?",
+            (hyp["id"],), one=True)
+    assert "the one that ran" in row["source"], "the run recorded no program"
+
+
+def test_an_experiment_with_no_program_anywhere_is_still_refused(temp_db):
+    """Widening the guard to look at the payload must not widen it to nothing:
+    a call with no source, no command and no main.py has nothing to run, and
+    inventing a verdict for it is how a prediction gets graded against a run
+    that never happened."""
+    hyp = research.open_hypothesis("nothing to run", turn_idx=1)
+    out = coding.run_experiment(hyp["id"], files={"helper.py": "X = 1\n"},
+                                expect={"exit_zero": True}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_INCONCLUSIVE, out
+    assert "naming what to run" in out["why"]
+
+
 # ---- The missing verb: a change that outlives the turn ----
 
 def test_an_edit_lands_on_disk_and_returns_a_reviewable_diff(temp_db, tmp_path):

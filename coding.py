@@ -426,6 +426,33 @@ def judge(result, expect):
     return OUTCOME_CONFIRMED, "prediction held"
 
 
+def _archive_of(payload):
+    """What actually ran, for a run whose program was never in `source`.
+
+    A run that puts its whole program in `files` recorded an EMPTY source and
+    `source_chars=0`: the row named a command, a prediction, an outcome and an
+    observation, and nothing anywhere said what the program WAS. Observed on
+    the failure-classification run of 2026-08-05 — a pytest plugin that
+    produced the only counts of the turn, and that became unreproducible the
+    moment the sandbox was torn down. `source_chars=0` was not a lie, which is
+    exactly what made it unreadable: it truthfully reported `len(source)` for
+    a run that had no `source`, so the row looked like an experiment with no
+    program rather than one whose program was stored somewhere else. Nowhere
+    else was storing it.
+
+    The row is a record, not a filesystem — bodies are named and joined, and
+    the caller's `[:8000]` truncation still applies with the true length
+    beside it.
+    """
+    parts = []
+    for name in sorted(payload):
+        body = payload[name]
+        if isinstance(body, (bytes, bytearray)):
+            body = f"<{len(body)} bytes, not text>"
+        parts.append(f"# ---- {name} ----\n{body}")
+    return "\n".join(parts)
+
+
 def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                    files=None, command=None, timeout=None, note="",
                    cwd="", collect=(), session_id=None):
@@ -476,7 +503,13 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
         if payload.get("main.py") not in (None, source):
             shadowed = "main.py"
         payload["main.py"] = source
-    elif command is None:
+    elif command is None and not str(payload.get("main.py") or "").strip():
+        # THE GUARD ASKS WHETHER THERE IS A PROGRAM, not which argument it
+        # arrived in. It used to demand `source` or an explicit command, so a
+        # caller that put its program straight into `files["main.py"]` — the
+        # exact file the default command runs — was turned away for having no
+        # program, with main.py sitting in the payload. Same shape as the
+        # defect above it: the check named the parameter instead of the thing.
         return {"outcome": OUTCOME_INCONCLUSIVE,
                 "why": "an experiment needs either source to run or a command "
                        "naming what to run",
@@ -539,10 +572,15 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     # `skipped` list capped at 40 beside a true `skipped_count`. The
     # truncation stays (the row is a record, not a filesystem); what changes
     # is that the record admits it.
+    #
+    # AND IT ARCHIVES WHAT RAN, not the argument it happened to arrive in. A
+    # `files`-only run stored nothing at all — see `_archive_of`.
+    archive = source if source.strip() else _archive_of(payload)
     qi("INSERT INTO experiments(hypothesis_id,digest,source,source_chars,"
        "command,expect,outcome,observation,note,turn_idx,created) "
        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-       (hypothesis_id, digest, source[:8000], len(source), json.dumps(command),
+       (hypothesis_id, digest, archive[:8000], len(archive),
+        json.dumps(command),
         json.dumps(expect), outcome, _fit_observation(observation),
         str(note)[:400],
         turn_idx, time.time()))
