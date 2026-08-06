@@ -507,7 +507,6 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
     # wrote — see `_archive_of`. Authored files win the collision, as they did
     # when `.update` did the merging one layer up.
     authored = dict(files or {})
-    moved_program = False
     payload = dict(workspace_files or {})
     payload.update(authored)
     shadowed = ""
@@ -553,10 +552,26 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
         # of a hypothesis, but it cost the turn every time.
         here = os.path.relpath("main.py", str(cwd or "") or ".")
         command = [sys.executable, "-s", here.replace(os.sep, "/")]
-        # We put the program somewhere the caller did not choose, so we
-        # also make `cwd` importable. A caller's OWN command gets the
-        # environment a developer would have, untouched.
-        moved_program = True
+        # THE PATH GOES TO THE PROGRAM, NOT TO THE ENVIRONMENT. We put the
+        # program somewhere the caller did not choose, so it needs `cwd` on
+        # its own sys.path — but PYTHONPATH is INHERITED, and a probe that
+        # shells out to a project's own tooling hands it down to a grandchild
+        # that never asked for it. Measured: two lanes over the same tree, one
+        # plain `pytest` under `cwd` (4,547 passed) and one relocated program
+        # shelling out to the same `pytest` (1 failed, 4,546) — the failure
+        # being a CLI whose `if str(ROOT) not in sys.path` guard skips its
+        # front-insert once the root is on PYTHONPATH. The environment fix
+        # repaired the caller's command and broke the grandchild instead.
+        #
+        # A prepended line reaches exactly the program we moved and nothing
+        # below it, and it stays visible in the archived source, so the record
+        # shows what actually ran rather than an invisible env var.
+        if str(cwd or "").strip():
+            source = ("import sys as _s, os as _o; "
+                      "_s.path.insert(0, _o.getcwd())  # harness: `cwd` is "
+                      "importable because your program was relocated\n"
+                      + source)
+            authored["main.py"] = payload["main.py"] = source
     # `collect` UNION the predicted paths, never instead of them. Deriving
     # the list from the prediction is what stops a file predicate being judged
     # against a file nobody read back — but it also made "give me that file"
@@ -568,8 +583,7 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                   | {str(p) for p in (collect or ())})
     result = sandbox.run(payload, command,
                          timeout=timeout or sandbox.DEFAULT_TIMEOUT,
-                         collect=want, cwd=cwd,
-                         cwd_importable=moved_program)
+                         collect=want, cwd=cwd)
 
     outcome, why = judge(result, expect)
     digest = _digest(hypothesis_id, source, command, expect, payload)

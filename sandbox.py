@@ -227,7 +227,7 @@ MAX_COLLECT_BYTES = 200_000
 
 
 def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
-        import_paths=(), collect=(), cwd="", cwd_importable=False):
+        import_paths=(), collect=(), cwd=""):
     """Write `files` into a throwaway workspace, run `command`, report.
 
     `files` is {relative_path: contents}. `command` is an argv list. Returns a
@@ -360,29 +360,18 @@ def run(files, command, *, timeout=DEFAULT_TIMEOUT, stdin="",
                     "stderr": f"no such directory in the workspace: {cwd!r}",
                     "truncated": False, "seconds": 0.0, "timed_out": False,
                     "harness": harness}
-        # ONLY WHEN WE MOVED THE PROGRAM. A run whose program we synthesised
-        # at the payload root and then pointed at from a `cwd` below cannot
-        # import that directory, because Python puts the SCRIPT's directory on
-        # sys.path and never the working one — so `source` plus `cwd` came
-        # back `ModuleNotFoundError: No module named 'db'` from a run whose
-        # whole purpose was to read `db.py`.
-        #
-        # BUT A CALLER'S OWN COMMAND MUST SEE THE REAL ENVIRONMENT. Adding
-        # `cwd` unconditionally made the sandbox unlike the machine it is
-        # standing in for, and a real project noticed within the hour:
-        #   ROOT = Path(__file__).resolve().parents[1]
-        #   if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
-        # is a guard that inserts the project root at the FRONT when it is
-        # absent. Put it on PYTHONPATH and the guard sees it present, skips
-        # the insert, and leaves the script's own directory first — where the
-        # import finds the script instead of the module it names. One
-        # previously-passing test went red, in a suite that had just been
-        # repaired to zero, on a change that was supposed to be invisible.
-        # A developer standing in that directory does not have it on
-        # PYTHONPATH, so neither should a run that is imitating them.
+        # THE RUN DIRECTORY IS NOT PUT ON THE PATH. It was, briefly, to let
+        # a relocated program import from the directory it runs in — and that
+        # made the sandbox unlike the machine it stands in for. PYTHONPATH is
+        # INHERITED, so a probe shelling out to a project's own tooling handed
+        # it to a grandchild, where `if str(ROOT) not in sys.path` saw the
+        # root present, skipped its front-insert, and resolved an import to
+        # the script instead of the module. Measured over one tree: plain
+        # pytest under `cwd` 4,547 passed, a relocated program shelling out to
+        # the same pytest 1 failed. `coding` now prepends a sys.path line to
+        # the program it moved, which reaches that program and nothing below
+        # it, and stays visible in the archived source.
         paths = list(import_paths or [])
-        if cwd_importable and run_dir != workspace:
-            paths.insert(0, run_dir)
         started = time.perf_counter()
         try:
             proc = subprocess.Popen(
