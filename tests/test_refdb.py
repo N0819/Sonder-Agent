@@ -260,3 +260,41 @@ def test_a_real_second_statement_is_still_refused(ref):
     result = refdb.query("engine", "SELECT 1; SELECT 2")
     assert result["ok"] is False and "one statement" in result["error"]
     assert refdb.query("engine", "DELETE FROM turns")["ok"] is False
+
+
+def test_the_registry_survives_a_restart_that_forgets_the_environment(
+        temp_db, tmp_path, monkeypatch):
+    """AN EXPORT BELONGS TO WHOEVER STARTED THE PROCESS, and the process gets
+    restarted by a script, a service file, or somebody debugging at two in the
+    morning. This lane was environment-only: a restart that did not carry
+    `ASSISTANT_REFDB` left the engine unreachable, `reference_databases` came
+    back empty, `query_db` refused a name that had worked an hour earlier, and
+    nothing anywhere said the lane had been configured and then lost.
+    """
+    import config
+    path = tmp_path / "engine.db"
+    sqlite3.connect(path).close()
+    monkeypatch.delenv("ASSISTANT_REFDB", raising=False)
+    config.save_config({"reference_databases": f"engine={path}"})
+    refdb.configure()
+    try:
+        assert [d["name"] for d in refdb.databases()] == ["engine"]
+    finally:
+        refdb.configure({})
+
+
+def test_what_was_typed_beats_a_stale_export(temp_db, tmp_path, monkeypatch):
+    """The same precedence the credential fields already argue for: a stale
+    export silently shadowing what you configured is the failure that whole
+    episode was made of.
+    """
+    import config
+    stored = tmp_path / "stored.db"
+    sqlite3.connect(stored).close()
+    monkeypatch.setenv("ASSISTANT_REFDB", "engine=/nowhere/stale.db")
+    config.save_config({"reference_databases": f"engine={stored}"})
+    refdb.configure()
+    try:
+        assert refdb.databases()[0]["ok"] is True
+    finally:
+        refdb.configure({})

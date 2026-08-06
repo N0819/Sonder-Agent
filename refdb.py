@@ -98,8 +98,23 @@ def configure(mapping=None):
     """
     global _DATABASES
     if mapping is None:
+        # STORED BEATS EXPORTED, the same precedence the credential fields
+        # follow and for the same reason: an export belongs to whoever started
+        # the process. This lane was environment-only, and a restart that did
+        # not carry `ASSISTANT_REFDB` left the engine silently unreachable —
+        # `reference_databases` empty, `query_db` refusing a name that had
+        # worked an hour earlier, and nothing saying the lane had been
+        # configured and then lost. Imported here rather than at module level:
+        # `config` needs a database, and this module is imported by tests that
+        # have none.
+        raw = os.environ.get("ASSISTANT_REFDB") or ""
+        try:
+            import config
+            raw = str(config.get_config().get("reference_databases") or raw)
+        except Exception:  # noqa: BLE001 - no settings row is not an error
+            pass
         mapping = {}
-        for pair in (os.environ.get("ASSISTANT_REFDB") or "").split(","):
+        for pair in raw.split(","):
             name, _, path = pair.partition("=")
             if name.strip() and path.strip():
                 mapping[name.strip()] = path.strip()

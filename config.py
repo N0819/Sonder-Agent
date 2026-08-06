@@ -91,6 +91,16 @@ _DEFAULTS = {
     # zero — including a bare "BBC News" control — while the loop reported
     # only "search returned nothing". "" leaves the built-in scrape in place,
     # which is honest about being blocked but will not find anything.
+    # WHICH REFERENCE DATABASES CAN BE READ, as `name=/path` pairs. Stored
+    # rather than exported for the reason the key fields above are: an export
+    # belongs to whoever started the process, and the process gets restarted by
+    # a script, a service file, or somebody debugging at two in the morning.
+    # This one was configured only by `ASSISTANT_REFDB`, and a restart that did
+    # not set it left the engine unreachable — `reference_databases` came back
+    # empty, `query_db` answered "no reference database named 'engine'", and
+    # nothing anywhere said the lane had been configured and then lost. The
+    # settings row survives the restart; the export did not.
+    "reference_databases": lambda: os.environ.get("ASSISTANT_REFDB", ""),
     "search_provider": lambda: os.environ.get("ASSISTANT_SEARCH_PROVIDER", ""),
     "search_key_env": lambda: "ASSISTANT_SEARCH_KEY",
     "search_key": lambda: "",
