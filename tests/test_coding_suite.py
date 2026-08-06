@@ -479,6 +479,25 @@ def test_a_program_written_straight_into_main_py_is_not_turned_away(temp_db):
     assert "the one that ran" in row["source"], "the run recorded no program"
 
 
+def test_inline_source_still_runs_when_the_working_directory_moves(temp_db):
+    """`main.py` is written to the top of the payload and `cwd` moves the
+    working directory into a subdirectory of it, so the default command went
+    looking for the program inside `cwd` and did not find it — `can't open
+    file '/tmp/assistant-exp-.../Sonder_Engine-alpha-7.2/main.py'`. Every
+    experiment pairing inline source with `cwd` failed that way, which is the
+    ordinary shape of "run this probe, with the working directory a project
+    expects". Inconclusive rather than refuted, so it cost a turn each time
+    instead of a hypothesis."""
+    hyp = research.open_hypothesis("does cwd lose the program?", turn_idx=1)
+    out = coding.run_experiment(
+        hyp["id"],
+        source="import os\nprint('CWD=' + os.path.basename(os.getcwd()))\n",
+        workspace_files={"proj/pkg/keep.py": "X = 1\n"},
+        cwd="proj/pkg",
+        expect={"exit_zero": True, "stdout_has": "CWD=pkg"}, turn_idx=1)
+    assert out["outcome"] == coding.OUTCOME_CONFIRMED, out["why"]
+
+
 def test_the_workspace_a_run_happened_in_is_not_archived_as_its_program(
         temp_db):
     """Archiving the whole payload made a run over the user's tree record

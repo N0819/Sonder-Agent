@@ -40,6 +40,7 @@
 
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -537,7 +538,20 @@ def run_experiment(hypothesis_id, *, source="", expect, turn_idx,
                        "naming what to run",
                 "result": None, "evidence": None, "repeated": False}
     if command is None:
-        command = [sys.executable, "-s", "main.py"]
+        # THE PROGRAM IS AT THE ROOT; THE COMMAND RUNS IN `cwd`. `main.py` is
+        # written to the top of the payload, and `cwd` moves the working
+        # directory into a subdirectory of it — so the default command went
+        # looking for the program inside `cwd` and did not find it:
+        #   can't open file '/tmp/assistant-exp-…/Sonder_Engine-alpha-7.2/
+        #   Sonder_Engine-alpha-7.2/main.py': [Errno 2]
+        # Every experiment that pairs inline `source` with `cwd` failed that
+        # way, which is the ordinary shape of "run this probe, but with the
+        # working directory a project expects" — and the two halves were
+        # written by different lines that never agreed on where the file was.
+        # Graded INCONCLUSIVE rather than refuted, so it cost a turn instead
+        # of a hypothesis, but it cost the turn every time.
+        here = os.path.relpath("main.py", str(cwd or "") or ".")
+        command = [sys.executable, "-s", here.replace(os.sep, "/")]
     # `collect` UNION the predicted paths, never instead of them. Deriving
     # the list from the prediction is what stops a file predicate being judged
     # against a file nobody read back — but it also made "give me that file"
