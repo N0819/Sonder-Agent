@@ -714,6 +714,47 @@ def _claude_code_complete(cfg, system, user):
 
 
 
+def json_failure(raw):
+    """WHY the parse failed, in the decoder's own words, with the text there.
+
+    Diagnostics for this have been rebuilt three times and each version stored
+    a little less than the next failure needed. Head and tail answer "was it
+    truncated"; raw newline counts answer "was it a control character"; and
+    when the answer to both is no — an object that closes, on one line — there
+    was nothing left to look at, because the exception carrying the position
+    was caught and dropped inside `parse_model_json`.
+
+    `JSONDecodeError` knows the message and the exact character offset. A
+    window around that offset names the cause outright: an unescaped `"`
+    inside a SQL string reads as `Expecting ',' delimiter` with the quote
+    sitting in the middle of the window.
+
+    Returns {} when the text parses, so a caller can record it unconditionally.
+    """
+    import re
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    start = text.find("{")
+    if start < 0:
+        return {"error": "no object in the output at all"}
+    body = text[start:]
+    try:
+        json.JSONDecoder(strict=False).raw_decode(body)
+        return {}
+    except ValueError as exc:
+        pos = getattr(exc, "pos", None)
+        out = {"error": str(exc)}
+        if isinstance(pos, int):
+            out["at_char"] = pos + start
+            out["window"] = body[max(0, pos - 90):pos + 90]
+        # Brace balance beats "the last character is a }": a nested object cut
+        # short still ends in a brace and reads as closed.
+        out["brace_balance"] = body.count("{") - body.count("}")
+        out["quote_count"] = body.count('"')
+        return out
+
+
 def parse_model_json(raw):
     """Tolerant JSON extraction from model output — fenced blocks, prose
     around the object, trailing commas, and literal newlines inside strings.

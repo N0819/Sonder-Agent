@@ -43,7 +43,8 @@ import turnrun
 import workspace
 from db import (ensure_session, next_turn_idx, q, qi, state_get, state_put,
                 transaction)
-from providers import chat_complete, chat_configured, parse_model_json
+from providers import (chat_complete, chat_configured,
+                       json_failure as chat_json_failure, parse_model_json)
 
 USER_SUBJECT = "the user"
 
@@ -301,6 +302,9 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
                 "closed": raw_text.rstrip().endswith(("}", "```")),
                 "raw_newlines": raw_text.count("\n"),
                 "raw_tabs": raw_text.count("\t"),
+                # The decoder's own account. Everything above narrows the
+                # field; this names the character.
+                **chat_json_failure(raw_text),
             }
             return None, deliberation, delivered, cost
         more = out.get("need_more")
@@ -796,6 +800,13 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                         + (f" — object CLOSED ({bad.get('raw_newlines', 0)} raw"
                            f" newlines), so this is not truncation"
                            if bad.get("closed") else " — object did NOT close")
+                        # The decoder's verdict comes FIRST when there is one:
+                        # head and tail narrow the field, this names the
+                        # character, and a reader who stops after one line
+                        # should stop after the useful one.
+                        + (f" — {bad['error']} at char {bad.get('at_char')}, "
+                           f"around: {bad.get('window', '')[:160]!r}"
+                           if bad.get("error") else "")
                         + f"; begins {bad['head'][:120]!r}"
                         + (f", ends {bad['tail'][-120:]!r}"
                            if bad.get("tail") else ""))

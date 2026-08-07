@@ -79,6 +79,42 @@ def test_the_trailing_comma_path_still_earns_its_place():
     assert providers.parse_model_json('{"a": [1, 2,],}') == {"a": [1, 2]}
 
 
+def test_the_decoder_names_the_character_that_broke_it():
+    """THE THIRD REPRODUCTION, and the reason this instrument kept being
+    rebuilt. Head and tail answer "was it truncated". Newline counts answer
+    "was it a control character". When both say no — an object that closes, on
+    one line — there was nothing left to look at, because the exception
+    carrying the position was caught and dropped.
+
+    Live: 6,554 characters beginning `{"need_more": {"query_db": {"database":
+    "engine", "sql": "SELECT ...`. SQL inside JSON is a quoting minefield, and
+    one unescaped `"` ends the string early with everything after it garbage.
+    """
+    raw = '{"need_more": {"query_db": {"sql": "SELECT "col" FROM t"}}}'
+    bad = providers.json_failure(raw)
+    assert "delimiter" in bad["error"] or "Expecting" in bad["error"], bad
+    assert isinstance(bad["at_char"], int)
+    assert '"col"' in bad["window"], bad["window"]
+
+
+def test_a_healthy_payload_reports_no_failure():
+    """Recorded unconditionally by the caller, so it must be silent when there
+    is nothing wrong.
+    """
+    assert providers.json_failure('{"reply": "fine"}') == {}
+    assert providers.json_failure("") == {}
+
+
+def test_brace_balance_beats_the_last_character():
+    """`closed` asks whether the text ends in a brace, and a nested object cut
+    short still does. The balance says how many are outstanding.
+    """
+    cut = '{"need_more": {"query_db": {"sql": "SELECT 1"'
+    bad = providers.json_failure(cut)
+    assert bad["brace_balance"] == 3, bad
+    assert providers.json_failure('{"a": {"b": 1}}')  == {}
+
+
 def test_relaxing_control_characters_relaxes_nothing_else():
     """The narrow claim this fix rests on. `strict=False` permits control
     characters inside strings and changes no other rule -- so genuinely broken
