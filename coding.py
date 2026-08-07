@@ -968,7 +968,22 @@ def apply_edit(path, contents=None, *, turn_idx, replace=None,
     if replace:
         # Anchored mode reads the file itself, so the assistant never has to
         # reproduce the parts it is not changing.
-        current = workspace.read_file(path, session_id)
+        #
+        # AND IT READS PAST THE CONTEXT CAP, which is the whole point. This
+        # call used to take `MAX_READ_BYTES` — the limit that exists to stop a
+        # file being handed to the MODEL — and refused any edit to a file over
+        # 200,000 characters with "work on it in chunks". That advice is
+        # incoherent here: anchors ARE how you edit without reading the file,
+        # and there is no chunked form of an anchored edit to fall back to.
+        # The one mode built for files too large to reproduce was capped by
+        # the limit that exists because files can be too large to reproduce.
+        #
+        # Live: `prompts.py`, 286,803 bytes, refused. This text is consumed by
+        # `apply_replacements` and never reaches a prompt, so the context cap
+        # is protecting nothing on this path. MAX_EDIT_BYTES is the separate,
+        # much larger bound that keeps a runaway file out of memory.
+        current = workspace.read_file(path, session_id,
+                                      limit=workspace.MAX_EDIT_BYTES)
         if not current.get("ok"):
             return {"ok": False, "path": str(path),
                     "why": current.get("error")

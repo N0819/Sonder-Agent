@@ -52,6 +52,14 @@ MAX_EXTRACT_MEMBERS = 5000
 # this bound is about a model's context, not a disk, and a file above it is
 # what `chunks` exists for.
 MAX_READ_BYTES = 200_000
+# What an ANCHORED EDIT may read. Deliberately far above MAX_READ_BYTES and
+# deliberately a separate name: that cap exists because a file can be too
+# large to put in front of the model, and this text never goes there — it is
+# consumed by `coding.apply_replacements` and thrown away. Sharing the one
+# constant meant the only editing mode designed for large files refused to
+# touch them, and said "work on it in chunks" about an operation that has no
+# chunked form. The bound that remains is about memory, not context.
+MAX_EDIT_BYTES = 8_000_000
 # A diff long enough to review is short enough to read. Past this the change
 # is not a patch, it is a rewrite, and the honest report is that it was
 # truncated rather than a wall the reviewer skims.
