@@ -504,12 +504,32 @@ print("''' + SENTINEL + ''' " + json.dumps(out))
 # --------------------------------------------------------------------------
 
 def _turns_in(db_path):
-    """How many turns the lab has actually played, asked of the lab itself."""
+    """How many turns the lab has actually PLAYED, asked of the lab itself.
+
+    Counted by whether the turn reached commit, not by whether a turn row
+    exists. The engine creates the row at the START of a turn, so
+    `COUNT(*) FROM turns` counts the one currently executing — and the caller
+    of this is a status listing, where the whole question is what has finished.
+
+    Live: lab `stairs` reported `turns_played: 2` while turn 2 was mid-flight
+    with four steps written, no narrator and no commit. An assistant polling
+    that number to decide whether to act would have read a turn in progress as
+    a turn done, which is the same shape as the zombie-poll defect one lane
+    over: a status field answering a question adjacent to the one asked.
+    """
     if not os.path.isfile(db_path):
         return 0
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
         try:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM turns t WHERE EXISTS ("
+                "  SELECT 1 FROM steps s"
+                "  WHERE s.turn_id = t.id AND s.key = 'commit')"
+            ).fetchone()[0])
+        except sqlite3.Error:
+            # No `steps` table: an older or partly-migrated lab. The row count
+            # is then the best available answer and is still worth returning.
             return int(conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
         finally:
             conn.close()
