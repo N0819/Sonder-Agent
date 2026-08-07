@@ -281,13 +281,26 @@ def _deliberate(payload, persona_sheet, turn_idx, session_id, run, warnings):
             # Both ends, because the two diagnoses live at opposite ones: a
             # refusal or a prose preamble shows at the head, and truncation at
             # max_tokens shows as a sentence that simply stops at the tail.
-            text = " ".join(str(raw or "").split())
+            raw_text = str(raw or "")
+            text = " ".join(raw_text.split())
+            # WHITESPACE IS EVIDENCE HERE, and collapsing it hid the one cause
+            # this record exists to find. An unescaped newline inside a string
+            # is what `json.loads` rejects by default, and `" ".join(split())`
+            # erases exactly that before the head/tail are stored — so a
+            # control-character failure and a truncation read identically in
+            # the warning, and every one of these was diagnosed as truncation.
+            # Counted from the raw, before normalisation.
             cost["unparseable"] = {
-                "chars": len(str(raw or "")),
+                "chars": len(raw_text),
                 "head": text[:400],
                 "tail": text[-400:] if len(text) > 800 else "",
                 "round": round_no,
                 "sent_chars": len(sent),
+                # Whether the object closed. Truncation at max_tokens stops
+                # mid-sentence; a control-character rejection does not.
+                "closed": raw_text.rstrip().endswith(("}", "```")),
+                "raw_newlines": raw_text.count("\n"),
+                "raw_tabs": raw_text.count("\t"),
             }
             return None, deliberation, delivered, cost
         more = out.get("need_more")
@@ -769,8 +782,14 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
                     warnings.append(
                         "respond stage returned unparseable output: "
                         f"{bad['chars']:,} chars back on a "
-                        f"{bad['sent_chars']:,}-char payload — begins "
-                        f"{bad['head'][:120]!r}"
+                        f"{bad['sent_chars']:,}-char payload"
+                        # The discriminator, said out loud. An object that
+                        # closed did not run out of tokens, and the operator's
+                        # next move differs completely between the two.
+                        + (f" — object CLOSED ({bad.get('raw_newlines', 0)} raw"
+                           f" newlines), so this is not truncation"
+                           if bad.get("closed") else " — object did NOT close")
+                        + f"; begins {bad['head'][:120]!r}"
                         + (f", ends {bad['tail'][-120:]!r}"
                            if bad.get("tail") else ""))
                 else:

@@ -716,9 +716,25 @@ def _claude_code_complete(cfg, system, user):
 
 def parse_model_json(raw):
     """Tolerant JSON extraction from model output — fenced blocks, prose
-    around the object, trailing commas. Engine lineage: model output is
-    provisional until deterministic code validates it, and a parse failure is
-    a None the caller must handle, never an exception mid-pipeline."""
+    around the object, trailing commas, and literal newlines inside strings.
+    Engine lineage: model output is provisional until deterministic code
+    validates it, and a parse failure is a None the caller must handle, never
+    an exception mid-pipeline.
+
+    `strict=False` is the load-bearing word. JSON forbids an unescaped control
+    character inside a string, and `json.loads` enforces that by default — so a
+    reply whose `reply` field contained a paragraph break was rejected whole.
+    Nothing was truncated and nothing was malformed in any way that mattered:
+    the object opened and closed correctly and every field was present. It was
+    thrown away for a newline.
+
+    That is the shape the failures had all along. A turn died on 6,036
+    characters that began `{"reply": "Lab `stairs` is provisioned` and ended
+    `poll `runs` until done."}` — complete at both ends, which rules out the
+    truncation everyone reaches for first. `strict=False` relaxes ONLY the
+    control-character rule; every other malformation still fails, so this
+    cannot turn a genuinely broken payload into a plausible one.
+    """
     import re
     text = str(raw or "").strip()
     if not text:
@@ -731,7 +747,7 @@ def parse_model_json(raw):
             continue
         blob = re.sub(r",\s*([}\]])", r"\1", match.group(0))
         try:
-            out = json.loads(blob)
+            out = json.loads(blob, strict=False)
         except (TypeError, ValueError):
             continue
         if isinstance(out, dict):
