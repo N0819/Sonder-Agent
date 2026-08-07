@@ -739,9 +739,32 @@ def parse_model_json(raw):
     text = str(raw or "").strip()
     if not text:
         return None
+    decoder = json.JSONDecoder(strict=False)
     for candidate in (text, *re.findall(r"```(?:json)?\s*(.*?)```", text,
                                         re.S)):
         candidate = candidate.strip()
+        start = candidate.find("{")
+        if start < 0:
+            continue
+        # FIRST COMPLETE OBJECT, then stop reading. `re.search(r"\{.*\}")` is
+        # greedy: it runs to the LAST closing brace in the output, so one
+        # stray brace after a perfectly good object takes the object down with
+        # it. Live: 2,559 characters that began `{"reply":"Not landed yet.`
+        # and ended `holds the lab."}}` -- a complete object followed by a
+        # single extra `}`. The diagnostic said the object CLOSED and carried
+        # no raw newlines, which is what sent me here instead of back to
+        # max_tokens for the third time.
+        #
+        # raw_decode reads one value and reports where it stopped, so trailing
+        # anything -- a brace, a sentence, a second object -- is simply not
+        # read. It cannot salvage a trailing COMMA inside the object, which is
+        # what the regex path below still exists for.
+        try:
+            out, _end = decoder.raw_decode(candidate[start:])
+            if isinstance(out, dict):
+                return out
+        except ValueError:
+            pass
         match = re.search(r"\{.*\}", candidate, re.S)
         if not match:
             continue

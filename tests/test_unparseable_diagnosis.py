@@ -47,6 +47,38 @@ def test_tabs_too():
     assert providers.parse_model_json('{"reply": "a\tb"}') == {"reply": "a\tb"}
 
 
+def test_one_stray_brace_no_longer_takes_the_object_with_it():
+    """THE SECOND REPRODUCTION, found by the diagnostic added above -- it said
+    the object CLOSED and carried no raw newlines, which ruled out both
+    truncation and the control-character bug and pointed straight here.
+
+    Live: 2,559 characters beginning `{"reply":"Not landed yet.` and ending
+    `holds the lab."}}` -- a complete object followed by a single extra brace.
+    `re.search(r"\\{.*\\}")` is greedy, so it ran to that last brace and handed
+    `json.loads` something invalid.
+    """
+    out = providers.parse_model_json('{"reply":"Not landed yet."}}')
+    assert out == {"reply": "Not landed yet."}
+
+
+def test_trailing_anything_is_simply_not_read():
+    """The general form. A value is read once and where it ends is where
+    reading stops -- a second object, a sign-off, a stray bracket.
+    """
+    assert providers.parse_model_json('{"a":1} Hope that helps!') == {"a": 1}
+    assert providers.parse_model_json('{"a":1}{"b":2}') == {"a": 1}
+    assert providers.parse_model_json('{"a":1}]]') == {"a": 1}
+
+
+def test_the_trailing_comma_path_still_earns_its_place():
+    """raw_decode cannot salvage a trailing comma INSIDE the object, so the
+    regex-and-repair fallback is not dead code -- this is the case that keeps
+    it.
+    """
+    assert providers.parse_model_json('{"a": 1,}') == {"a": 1}
+    assert providers.parse_model_json('{"a": [1, 2,],}') == {"a": [1, 2]}
+
+
 def test_relaxing_control_characters_relaxes_nothing_else():
     """The narrow claim this fix rests on. `strict=False` permits control
     characters inside strings and changes no other rule -- so genuinely broken
