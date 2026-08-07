@@ -726,6 +726,52 @@ def _running(name):
     return None
 
 
+def _pid_alive(pid):
+    """Is this pid a process that could still be DOING something.
+
+    `os.kill(pid, 0)` is the obvious check and it is wrong here: a zombie — a
+    child that has exited and has not been reaped — still owns its pid, so
+    signal 0 is delivered without error and the run reads `running` forever.
+    Nothing reaps these: the turn is launched with Popen and the poll reads a
+    pid FILE, so the Popen object is long gone and no one ever calls wait().
+
+    Live, and it cost a whole investigation. Lab `stairs`, run 0003: the child
+    exited after 1.3 seconds of CPU and `runs()` reported `state: "running",
+    log_bytes: 228` on four consecutive polls across two turns. The assistant
+    doing the polling said it could not tell a long model call from a wedged
+    run "from the poll output alone" — correct, and the reason was that the
+    poll was telling it the process was alive.
+
+    Which is exactly what `runs()` above promises never to happen: "a run with
+    no result and no process is a failure, and it is reported as one... the
+    alternative is an entry that reads as pending forever, which is how a
+    crashed child gets mistaken for a slow one." The intent was right and the
+    liveness test had a hole in it.
+
+    Reaped on the way past, so a dead run stops lingering in the process table
+    as well as in the report. A pid that is not our child raises and is left
+    alone.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open("/proc/%d/stat" % pid) as fh:
+            # Field 3, after the comm field — which can itself contain spaces
+            # and parentheses, so split on the LAST ')' rather than the first.
+            state = fh.read().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True          # cannot tell; do not call a live run dead
+    if state != "Z":
+        return True
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass                 # not ours to reap; it is still dead
+    return False
+
+
 def runs(name, run=None, limit=8):
     """What the lab's runs did — finished, still going, or dead without a word.
 
@@ -753,13 +799,7 @@ def runs(name, run=None, limit=8):
                 pid = int(fh.read().strip())
         except (OSError, ValueError):
             pid = None
-        alive = False
-        if pid is not None:
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except OSError:
-                alive = False
+        alive = _pid_alive(pid) if pid is not None else False
         result = _read_result(path)
         if alive and not result.get("ok"):
             entry.update({"state": "running", "pid": pid,
