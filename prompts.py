@@ -428,6 +428,20 @@ something you do not have in front of you:
       full length.
     * `{{"verb": "memories", "chat_id": 46, "from_turn": 38, "to_turn": 44}}`
       — what the turn committed, with provenance and salience.
+    * `{{"verb": "lorebooks", "chat_id": 63}}` — every book the story can
+      retrieve from, and BY WHICH ROUTE. A chat reaches lore two ways,
+      `chats.lorebook_id` and the `chat_lorebooks` link table, and they
+      routinely disagree: chat 63's column points at a seven-entry book of
+      engine leavings while the authored shrine book its whole story rests on
+      arrives only through the link table. Reading one route answers "this
+      story has no layout lore", which is false and looks like a finding.
+    * `{{"verb": "lore", "chat_id": 63}}` or `{{"verb": "lore",
+      "book_id": 187}}` or `{{"verb": "lore", "text": "staircase"}}` — entries
+      without their content. Read `turn_added` FIRST: set means the ENGINE
+      wrote it during play, null means a person authored it. An engine-written
+      entry contradicting the authored ones, in the same book, with neither
+      `canon_locked`, is a whole class of layout bug.
+    * `{{"verb": "lore_entry", "entry_id": 2734}}` — one entry whole.
     * `{{"verb": "schema"}}` or `{{"verb": "schema", "table": "frames"}}` for
       anything these do not reach; then `query_db` for the bespoke question.
   THE PROSE IS THE LAST PLACE THE DEFECT BECAME VISIBLE, not the first place

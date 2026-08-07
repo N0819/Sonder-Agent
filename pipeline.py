@@ -352,6 +352,13 @@ def _story_lane(spec):
         "memories": lambda s: storydb.story_memories(
             s.get("chat_id"), s.get("from_turn"), s.get("to_turn"),
             database=database),
+        "lorebooks": lambda s: storydb.story_lorebooks(
+            s.get("chat_id"), database=database),
+        "lore": lambda s: storydb.lore_entries(
+            s.get("book_id"), s.get("chat_id"), s.get("text"),
+            database=database),
+        "lore_entry": lambda s: storydb.lore_entry(
+            s.get("entry_id") or s.get("id"), database=database),
         "schema": lambda s: storydb.schema(s.get("table"), database=database),
     }, "story")
 

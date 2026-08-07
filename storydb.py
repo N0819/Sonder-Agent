@@ -287,6 +287,122 @@ def story_memories(chat_id, lo=None, hi=None, database=DEFAULT_DATABASE,
             **({"cap": _note(result)} if _note(result) else {})}
 
 
+def story_lorebooks(chat_id, database=DEFAULT_DATABASE):
+    """Every lorebook a story can actually retrieve from, and by which route.
+
+    THE TRAP THIS EXISTS FOR. A chat reaches its lore by TWO independent
+    paths — `chats.lorebook_id`, a single column, and `chat_lorebooks`, a link
+    table — and they routinely disagree. Live: chat 63's `lorebook_id` is 184,
+    a seven-entry book of odds and ends the engine minted during play, while
+    the authored shrine book its whole story rests on is 187 and reaches it
+    only through `chat_lorebooks`. Reading the column alone answers "this
+    story has no layout lore", which is false and looks like a finding.
+
+    So both routes are resolved and each book says how it got here. `enabled`
+    is carried because a linked book can be switched off, and a disabled book
+    that still appears in a join is the next version of this same mistake.
+    """
+    cid = _int(chat_id)
+    if cid is None:
+        return {"ok": False, "error": "chat_id must be an integer"}
+    rows, result = _rows(
+        "SELECT b.id AS book_id, b.name AS name, b.book_type AS book_type, "
+        "'chat_lorebooks' AS route, cl.enabled AS enabled, "
+        "(SELECT COUNT(*) FROM lore_entries e WHERE e.lorebook_id = b.id) "
+        "AS entries, "
+        "(SELECT COUNT(*) FROM lore_entries e WHERE e.lorebook_id = b.id "
+        " AND e.canon_locked = 1) AS canon_locked, "
+        "(SELECT COUNT(*) FROM lore_entries e WHERE e.lorebook_id = b.id "
+        " AND e.turn_added IS NOT NULL) AS written_in_play "
+        "FROM chat_lorebooks cl JOIN lorebooks b ON b.id = cl.lorebook_id "
+        f"WHERE cl.chat_id = {cid} "
+        "UNION "
+        "SELECT b.id, b.name, b.book_type, 'chats.lorebook_id', 1, "
+        "(SELECT COUNT(*) FROM lore_entries e WHERE e.lorebook_id = b.id), "
+        "(SELECT COUNT(*) FROM lore_entries e WHERE e.lorebook_id = b.id "
+        " AND e.canon_locked = 1), "
+        "(SELECT COUNT(*) FROM lore_entries e WHERE e.lorebook_id = b.id "
+        " AND e.turn_added IS NOT NULL) "
+        "FROM chats c JOIN lorebooks b ON b.id = c.lorebook_id "
+        f"WHERE c.id = {cid} "
+        "ORDER BY entries DESC", database)
+    if rows is None:
+        return result
+    return {"ok": True, "chat_id": cid, "returned": len(rows), "books": rows,
+            "note": "a book reached only by 'chats.lorebook_id' and a book "
+                    "reached only by 'chat_lorebooks' are both live; reading "
+                    "one route alone is how a story looks lore-less",
+            **({"cap": _note(result)} if _note(result) else {})}
+
+
+def lore_entries(book_id=None, chat_id=None, text=None,
+                 database=DEFAULT_DATABASE, limit=40):
+    """Lore entries, by book, by story, or by what they say.
+
+    Entries are listed WITHOUT their content — a book runs to thousands of
+    characters an entry and the question is almost always which entry, not
+    what it says. `lore_entry` returns one whole. Embeddings never come back:
+    they are large and nobody reads them.
+
+    `turn_added` is the column worth reading first and the reason this returns
+    it beside the title. An entry with a turn number was written by the ENGINE
+    during play; one without was authored. Live, that distinction was the whole
+    diagnosis of a layout bug: entry 2734, `turn_added: 130`, titled "Shrine
+    Interior — Main Hall and Upstairs Resting Area", was the engine's own
+    invention sitting in the same book as twelve authored entries describing a
+    different building, with nothing ranking one over the other.
+    """
+    where = []
+    if _int(book_id) is not None:
+        where.append(f"e.lorebook_id = {_int(book_id)}")
+    if _int(chat_id) is not None:
+        where.append(
+            "e.lorebook_id IN ("
+            f"SELECT lorebook_id FROM chat_lorebooks WHERE chat_id = {_int(chat_id)}"
+            f" UNION SELECT lorebook_id FROM chats WHERE id = {_int(chat_id)})")
+    if text:
+        safe = str(text).replace("'", "''")
+        where.append("(e.keys LIKE '%%%s%%' OR e.title LIKE '%%%s%%' "
+                     "OR e.content LIKE '%%%s%%')" % (safe, safe, safe))
+    if not where:
+        return {"ok": False, "error": "give a book_id, a chat_id or text"}
+    rows, result = _rows(
+        "SELECT e.id AS id, e.lorebook_id AS book_id, e.category AS category, "
+        "e.title AS title, e.keys AS keys, e.canon_locked AS canon_locked, "
+        "e.importance AS importance, e.turn_added AS turn_added, "
+        "LENGTH(e.content) AS content_chars, e.embedding_model AS embedded_by "
+        f"FROM lore_entries e WHERE {' AND '.join(where)} "
+        f"ORDER BY e.lorebook_id, e.id LIMIT {_int(limit, 40)}", database)
+    if rows is None:
+        return result
+    return {"ok": True, "returned": len(rows), "entries": rows,
+            "note": "turn_added set = written by the engine during play; "
+                    "null = authored. canon_locked scores +0.1 in retrieval.",
+            **({"cap": _note(result)} if _note(result) else {})}
+
+
+def lore_entry(entry_id, database=DEFAULT_DATABASE):
+    """One lore entry whole, content included."""
+    eid = _int(entry_id)
+    if eid is None:
+        return {"ok": False, "error": "entry_id must be an integer"}
+    rows, result = _rows(
+        "SELECT e.id AS id, e.lorebook_id AS book_id, b.name AS book, "
+        "e.category AS category, e.title AS title, e.keys AS keys, "
+        "e.aliases AS aliases, e.canon_locked AS canon_locked, "
+        "e.importance AS importance, e.turn_added AS turn_added, "
+        "e.scope AS scope, e.relations AS relations, "
+        "e.knowledge_tag AS knowledge_tag, e.content AS content "
+        "FROM lore_entries e LEFT JOIN lorebooks b ON b.id = e.lorebook_id "
+        f"WHERE e.id = {eid}", database, max_cell=12000)
+    if rows is None:
+        return result
+    if not rows:
+        return {"ok": False, "error": f"no lore entry {eid}"}
+    return {"ok": True, "entry": rows[0],
+            **({"cap": _note(result)} if _note(result) else {})}
+
+
 def story_overview(chat_id, database=DEFAULT_DATABASE):
     """The shape of one story: how long, which characters, where it stalled.
 
