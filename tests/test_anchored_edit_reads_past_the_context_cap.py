@@ -71,3 +71,33 @@ def test_a_missing_anchor_still_fails_on_its_own_terms(big_file):
         hypothesis_id=None, why="", session_id=None)
     assert done["ok"] is False
     assert "read limit" not in str(done.get("why", "")), done
+
+
+# --- the digest rides with the bytes -------------------------------------
+
+def test_a_read_says_which_version_it_returned(big_file):
+    """A reader that anchors findings to a file version had to compute the
+    digest out of band -- a separate probe whose stdout carried a PRECONDITION
+    line -- and then reason about whether the probe and the read saw the same
+    file. Twice in one session that produced a self-graded "weaker than I
+    wanted": bytes from here, digest from a run several turns earlier, no way
+    to tell from inside whether the file had moved between them.
+
+    `write_file` already returns before/after digests. A read that cannot say
+    WHICH version it returned makes every citation off it provisional.
+    """
+    import hashlib
+
+    out = workspace.read_file("prompts.py", limit=workspace.MAX_EDIT_BYTES)
+    assert out["ok"] is True
+    assert out["sha256"] == hashlib.sha256(out["text"].encode()).hexdigest()
+
+
+def test_the_digest_moves_when_the_file_does(big_file):
+    """The property that makes it worth returning: it has to distinguish two
+    versions, or anchoring to it proves nothing.
+    """
+    before = workspace.read_file("prompts.py", limit=workspace.MAX_EDIT_BYTES)
+    (big_file / "prompts.py").write_text("changed")
+    after = workspace.read_file("prompts.py", limit=workspace.MAX_EDIT_BYTES)
+    assert before["sha256"] != after["sha256"]

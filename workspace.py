@@ -331,7 +331,20 @@ def read_file(relative, session_id=None, limit=MAX_READ_BYTES):
                 "error": f"{relative!r} is {size:,} bytes, larger than the "
                          f"{limit:,} character read limit; work on it in "
                          "chunks"}
-    return {"ok": True, "text": text, "bytes": len(text.encode())}
+    # THE DIGEST COMES BACK WITH THE BYTES. A reader that anchors its findings
+    # to a file version had to compute this out of band -- running a separate
+    # probe whose stdout carried a PRECONDITION line -- and then reason about
+    # whether the probe and the read saw the same file. Twice in one session
+    # that produced a self-graded "weaker than I wanted": bytes read here,
+    # digest from a run several turns earlier, no way to tell from inside
+    # whether the file had moved between them.
+    #
+    # It is the same fact the reader already needs and the same read it has
+    # already paid for. `write_file` returns before/after digests for exactly
+    # this reason; a read that cannot say WHICH version it returned makes every
+    # citation off it provisional.
+    return {"ok": True, "text": text, "bytes": len(text.encode()),
+            "sha256": hashlib.sha256(text.encode()).hexdigest()}
 
 
 def write_file(relative, contents, session_id=None):
