@@ -212,6 +212,41 @@ def workspace_bytes(session_id):
     return total
 
 
+def _largest_entries(session_id, top=3):
+    """The biggest top-level entries, as "name (N MiB)", for a full-workspace
+    refusal to name rather than merely announce.
+
+    Top level only and deliberately so: what fills a workspace is a directory
+    somebody copied in whole, and pointing at the 4,000th file inside it is
+    not an action anyone can take.
+    """
+    root = session_root(session_id)
+    sizes = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return "unreadable"
+    for name in names:
+        path = os.path.join(root, name)
+        total = 0
+        if os.path.isdir(path):
+            for dirpath, _dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, f))
+                    except OSError:
+                        pass
+        else:
+            try:
+                total = os.path.getsize(path)
+            except OSError:
+                total = 0
+        sizes.append((total, name))
+    sizes.sort(reverse=True)
+    return ", ".join("%s (%.0f MiB)" % (n, b / 1048576.0)
+                     for b, n in sizes[:top]) or "empty"
+
+
 def store_upload(session_id, filename, data):
     """Write one uploaded file into the session workspace.
 
@@ -352,9 +387,28 @@ def write_file(relative, contents, session_id=None):
             # Present but unreadable as text: the diff would be a lie, so it
             # says so rather than showing the whole file as an addition.
             before = ""
-    if (workspace_bytes(session_id) - len(before.encode())
-            + len(text.encode()) > MAX_WORKSPACE_BYTES):
-        return {"ok": False, "error": "this workspace is full"}
+    used = workspace_bytes(session_id)
+    if used - len(before.encode()) + len(text.encode()) > MAX_WORKSPACE_BYTES:
+        # SAY BY HOW MUCH, AND WHAT IS EATING IT. "This workspace is full" is
+        # true and useless: it names no quantity, so a reader cannot tell a
+        # document 200 bytes too large from a workspace 300 MB over, and it
+        # suggests nothing to delete.
+        #
+        # Live, and it cost two turns and three attempted writes: a sync had
+        # copied 685 MB of audio, images and a virtualenv into a 512 MiB
+        # workspace. Every write was refused with this string. The assistant
+        # read it, could not reconcile "full" with a workspace it believed
+        # held a few documents, and instead ran a file-by-file hunt to prove
+        # its own document was absent -- which it was, and for a reason this
+        # message had already been told and did not pass on.
+        return {"ok": False,
+                "error": "this workspace is full: %.1f MiB used of %.0f MiB, "
+                         "and this write needs %.1f KiB more. Largest "
+                         "entries: %s" % (
+                             used / 1048576.0,
+                             MAX_WORKSPACE_BYTES / 1048576.0,
+                             (len(text.encode()) - len(before.encode())) / 1024.0,
+                             _largest_entries(session_id))}
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8") as handle:
