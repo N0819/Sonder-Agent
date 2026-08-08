@@ -1,6 +1,6 @@
 # Ponder Engine
 
-**Version 1.1** — 24 modules, 502 tests, offline suite.
+**Version 2.0** — 24 modules, 591 tests, offline suite.
 Released as **Sonder Assistant**; renamed, same project.
 
 A single-user chatbot with an assistant persona, real long-term memory, and
