@@ -69,6 +69,7 @@ class TurnRun:
         # answered "too late" instead of being honoured.
         self._committing = False
         self._halt = False
+        self._wind_down = False
         # Child processes the turn is currently blocked on. A halt that only
         # sets a flag is checked at the NEXT stage boundary, and the stage
         # boundaries are on either side of a model call — measured at 47s for
@@ -162,6 +163,44 @@ class TurnRun:
             self._procs.clear()
             self._cond.notify_all()
             return "halting"
+
+    def request_wind_down(self):
+        """Ask for one closing report and then an end. Returns what happened.
+
+        THE THIRD THING, because there were only two and neither is what
+        "stop" usually means. `request_halt` raises out of the pipeline: the
+        work in flight is lost, and everything the run has learned but not yet
+        written goes with it. `say` is advisory by design — the automation
+        loop folds a message in beside the plan rather than over it, so that
+        "also check the tests" cannot throw away three iterations of work, and
+        the model decides whether it counts as a redirect.
+
+        That is right for steering and wrong for stopping. A stop request was
+        left to the judgement of the thing being asked to stop, which is the
+        one faculty a stop request exists to override. Observed: two wind-down
+        messages delivered and folded in as context, six further research
+        turns, neither instruction refused and neither obeyed.
+
+        So this is neither. The run gets exactly one more iteration and its
+        job is to REPORT — compile what is already in hand, say what is
+        unfinished and what would close it — and the loop then ends whatever
+        the model asks for next. Compiling is the point: the alternative to a
+        report is not a shorter run, it is a run whose findings were never
+        written down.
+        """
+        with self._cond:
+            if self.status != "running":
+                return "not_running"
+            if self._wind_down:
+                return "already"
+            self._wind_down = True
+            self._cond.notify_all()
+        self.emit("winding-down")
+        return "winding-down"
+
+    def winding_down(self):
+        with self._cond:
+            return self._wind_down
 
     def say(self, text):
         """Hand the running turn a message. Returns what happened.

@@ -50,6 +50,40 @@ _PROGRESS_KEYS = ("experiments", "edits", "research", "proposed_fix",
                   "subagents", "retired", "disputed", "closed_threads")
 
 
+# WHAT "STOP" MEANS. Not "drop it" — compile it.
+#
+# The alternative to a report is not a shorter run; it is a run whose findings
+# were never written down. This run had measured a reword rate, separated 59
+# artefacts from 103 gap slots and corrected its own denominator twice, none of
+# which was in a reply anyone would read. Halting loses that. Asking politely
+# gets folded in beside the plan and overruled.
+#
+# So the closing iteration is an ordinary turn with an unusual instruction: no
+# new evidence, compile what exists. The prohibitions name the specific verbs
+# rather than saying "no research", because a bare prohibition reads as a
+# suggestion of the thing it forbids — and every one of these was observed
+# being reached for after a stop was requested.
+WIND_DOWN_INSTRUCTION = (
+    "STOP RESEARCHING AND REPORT. This is the last iteration of this run: "
+    "whatever you ask for next, there will not be another one, so nothing you "
+    "leave for later survives.\n\n"
+    "Run no experiments, no labs, no subagents, no database queries and no "
+    "file edits this turn. Everything you have already established is enough "
+    "to write from, and anything that is not established is a known unknown "
+    "rather than one more query.\n\n"
+    "Compile, in this order:\n"
+    "1. What you now know that you did not know when the run started, with "
+    "the measurement behind each claim rather than the claim alone.\n"
+    "2. What you got WRONG during the run and how you found out — a run that "
+    "reports only its surviving conclusions is unreadable as evidence.\n"
+    "3. What is unfinished, and for each one the cheapest thing that would "
+    "close it, or 'unclosable' with what evidence was destroyed.\n"
+    "4. Anything committed to a branch: the sha, and what a reviewer should "
+    "look at hardest.\n\n"
+    "Quote your numbers with their denominators. A figure whose opportunity "
+    "count is missing is the failure this project has the most scars from.")
+
+
 def made_progress(result):
     """Did this iteration leave anything durable behind?
 
@@ -97,6 +131,7 @@ def run_session(text, session_id=None, run=None, run_turn=None,
     stalls = 0
     previous_step = ""
     stopped = "finished"
+    reported = False
 
     while nxt:
         iteration += 1
@@ -123,6 +158,25 @@ def run_session(text, session_id=None, run=None, run_turn=None,
         # attention was punished for it, and the way that failure shows up is
         # that they stop steering. Whether the interjection actually cancels
         # the plan is the model's call, made with both in front of it.
+        # WINDING DOWN ENDS THE RUN, WHOEVER DISAGREES. Checked before the
+        # inbox, because it is not a message and must not be foldable into the
+        # plan the way a message deliberately is.
+        #
+        # `reported` is set on the iteration that has just produced the report,
+        # so the report itself gets a whole ordinary turn — same stages, same
+        # commit — and the loop ends after it rather than before it.
+        if reported:
+            stopped = "wound down: reported on request"
+            break
+        if run.winding_down():
+            said = [s for s in run.drain_inbox() if s.strip()]
+            nxt = WIND_DOWN_INSTRUCTION + (
+                "\n\nWHAT THEY SAID WHEN THEY ASKED:\n" + "\n\n".join(said)
+                if said else "")
+            from_user, carried, reported = True, step, True
+            stalls, previous_step = 0, ""
+            continue
+
         said = [s for s in run.drain_inbox() if s.strip()]
         if said:
             nxt, from_user, carried = "\n\n".join(said), True, step
@@ -171,6 +225,10 @@ class _Unobserved:
 
     def emit(self, stage, **detail):
         pass
+
+    def winding_down(self):
+        # A run nobody is watching is a run nobody has asked to wind down.
+        return False
 
     def halted(self):
         return False

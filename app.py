@@ -124,6 +124,25 @@ def resume_cursor(header, param):
         return 0
 
 
+@app.post("/api/chat/{run_id}/wind-down")
+def chat_wind_down(run_id: str):
+    """Ask a run for one closing report, then an end.
+
+    A separate route from `say` and from the halt, because the three differ in
+    the only way a caller cares about — what survives. A halt loses the work in
+    flight; a message is advisory and the model may carry on; this one is
+    binding and keeps the findings, because the closing turn's whole job is to
+    write them down."""
+    run = turnrun.get(run_id)
+    if run is None:
+        return JSONResponse({"error": "unknown turn"}, status_code=404)
+    if not getattr(run, "auto", False):
+        return JSONResponse(
+            {"error": "this is a single turn, not an automation run — there "
+                      "is no next iteration to call off"}, status_code=400)
+    return {"outcome": run.request_wind_down(), "status": run.status}
+
+
 @app.get("/api/chat/{run_id}/events")
 def chat_events(run_id: str, request: Request):
     """Server-sent events for one turn: a step per stage, then `end`.
