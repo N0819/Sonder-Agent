@@ -388,6 +388,12 @@ def write_file(relative, contents, session_id=None):
         return {"ok": False,
                 "error": f"paths are relative to the workspace; {relative!r} "
                          "is absolute"}
+    # Checked here rather than in `coding.apply_edit`, because every write
+    # funnels through this function and a guard on one caller is a guard one
+    # new caller away from being absent.
+    blocked = protected_reason(relative)
+    if blocked:
+        return {"ok": False, "error": f"refused: {blocked}"}
     # The parent must resolve inside the workspace even when the file does not
     # exist yet, so the check is on the directory and then on the whole path.
     parent = _resolved_under(root, os.path.dirname(relative) or ".")
@@ -543,6 +549,11 @@ def list_files(session_id=None):
 
 def delete_file(session_id, relative):
     root = session_root(session_id)
+    # DELETION IS A WRITE. Guarding `write_file` alone would leave the gate
+    # removable by deleting it, which is the same outcome by a quieter route.
+    blocked = protected_reason(relative)
+    if blocked:
+        return {"ok": False, "error": f"refused: {blocked}"}
     target = _resolved_under(root, relative)
     if target is None or not os.path.exists(target):
         return {"ok": False, "error": "no such file in this workspace"}
@@ -830,6 +841,62 @@ WITHHELD_DETAIL_CHARS = 40_000
 # was told nothing arrived — and it correctly recorded the lane as an
 # instrument fault and started budgeting fourteen runs to read one 6 KB
 # function through stdout instead.
+# THE ASSISTANT'S OWN SOURCE, checked out live so its edits reach real code
+# with real tests rather than an inert copy. It sits on its own git branch and
+# a human merges it; that merge, and the restart after it, are the outside
+# check — not this list.
+SELF_TREE = "Sonder_Assistant_working"
+
+# WHAT IT MAY NOT WRITE INSIDE ITS OWN SOURCE.
+#
+# Not a security boundary, and it must not be described as one. The tree is
+# Turing-complete and a determined edit routes around any denylist — a new
+# module imported from a file that is not on this list does whatever it likes.
+# What this buys is that the gates cannot be removed BY ACCIDENT, and that
+# removing them deliberately requires an edit that is conspicuous in a diff a
+# human is already reading.
+#
+# The list is derived, not chosen by taste: each of these files IS one of the
+# checks that governs the assistant, so an edit here is the gated thing
+# editing its own gate.
+#
+#   workspace.py  this rule, and the workspace confinement
+#   coding.py     reproduce-before-you-fix, and the edit path itself
+#   refdb.py      credential redaction, and the closed-table authorizer
+#   config.py     where credentials live
+#   providers.py  the model call, and the credentials it carries
+#   .git          branch, history, and what a merge would bring
+#
+# Absent deliberately: pipeline.py, memory.py, research.py, prompts.py. Those
+# are where the assistant's real self-repairs land, and a list that covered
+# them would be a list that forbids the capability rather than bounding it.
+PROTECTED_IN_SELF = (
+    "workspace.py", "coding.py", "refdb.py", "config.py", "providers.py")
+
+
+def protected_reason(relative):
+    """Why this path may not be written, or None if it may.
+
+    Paths are matched inside `SELF_TREE` only. The engine clone in the same
+    workspace has none of these constraints — it is not the code running this
+    process, and confusing the two would forbid the work the lane exists for.
+    """
+    parts = [p for p in str(relative or "").replace("\\", "/").split("/") if p]
+    if not parts or parts[0] != SELF_TREE:
+        return None
+    inner = parts[1:]
+    if any(p == ".git" or p.startswith(".git") for p in inner):
+        return ("git's own state decides what a merge would bring, and the "
+                "merge is the review step")
+    if len(inner) == 1 and inner[0] in PROTECTED_IN_SELF:
+        return (f"{inner[0]} is one of the checks that governs you — the "
+                "reproduce-before-fix gate, the workspace confinement, the "
+                "credential redaction, or the closed-table authorizer. "
+                "Propose the change as a diff in your reply instead; it is "
+                "read by a human before it lands, which is the point")
+    return None
+
+
 RUN_OUTPUT_DIR = "_runs"
 # Newest run folders kept. Old ones are pruned rather than accumulating: this
 # is a delivery buffer, not an archive, and the experiments table already
