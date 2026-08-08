@@ -103,6 +103,23 @@ def _normalise(text):
     return " ".join(str(text or "").lower().split())
 
 
+def _held_for(actions):
+    """How many iterations in a row the action has been the same, this one
+    included. CONSECUTIVE, not a tally: an action returned to after a detour
+    is a different thing from one never let go of, and a plain count cannot
+    tell them apart. Blank actions break the streak rather than extending it —
+    an iteration that named no action is not evidence of holding to one.
+    """
+    if not actions or not actions[-1]:
+        return 0
+    held, last = 0, actions[-1]
+    for a in reversed(actions):
+        if a != last:
+            break
+        held += 1
+    return held
+
+
 def run_session(text, session_id=None, run=None, run_turn=None,
                 stall_limit=STALL_LIMIT):
     """Iterate turns until the assistant stops asking for another.
@@ -132,6 +149,7 @@ def run_session(text, session_id=None, run=None, run_turn=None,
     previous_step = ""
     stopped = "finished"
     reported = False
+    actions = []
 
     while nxt:
         iteration += 1
@@ -147,6 +165,23 @@ def run_session(text, session_id=None, run=None, run_turn=None,
                         "from_user": from_user})
 
         step = str(result.get("continue_work") or "").strip()
+
+        # THE TRAJECTORY, RECORDED AND NOT GRADED. `continue_work` is asked to
+        # change every iteration — prompts.py says so in as many words — so it
+        # cannot indicate anything by changing. `next_action` is asked to hold
+        # still and narrow, which means repetition in it is meaningful where
+        # repetition in the step is not.
+        #
+        # Nothing here stops a run. Every brake proposed for this loop was a
+        # guess about a field nobody had ever written down, and the one that
+        # would have caught the run that prompted all this fired because a
+        # human ran it by hand. So: collect first, threshold later, and only
+        # against history this produces.
+        action = str(result.get("next_action") or "").strip()
+        actions.append(action)
+        if action:
+            run.emit("action", n=iteration, action=action[:400],
+                     held=_held_for(actions))
 
         # SPEAKING UP MUST NOT COST THE WORK IN FLIGHT. `_deliberate` drains
         # the same inbox mid-turn, so what reaches here arrived after the last
@@ -209,13 +244,29 @@ def run_session(text, session_id=None, run=None, run_turn=None,
 
         previous_step, nxt, from_user, carried = step, step, False, ""
 
-    run.emit("loop", state="stopped", iterations=iteration, why=stopped)
+    # DID IT STOP ITSELF, OR WAS IT STOPPED. One field, and the reason it is
+    # worth a field: reading 18 past sessions by hand showed that ZERO of them
+    # ended because the work was done — 8 external tune-ups, 7 mid-task
+    # redirects, 1 tool failure. Every one was stopped from outside. That is
+    # the single most useful fact anybody has established about how this loop
+    # behaves, and recovering it took a session of archaeology because nothing
+    # recorded it at the time.
+    #
+    # It also bounds what the 0/18 can mean. A run stopped from outside cannot
+    # tell you whether its end-condition would have fired, so an interruption
+    # rate is not an efficacy measurement — and with this recorded, the two
+    # stop being conflatable.
+    ended_itself = stopped in ("finished", "wound down: reported on request")
+    run.emit("loop", state="stopped", iterations=iteration, why=stopped,
+             ended_itself=ended_itself,
+             actions_held=_held_for(actions), actions=len([a for a in actions
+                                                           if a]))
     if result is None:
         return {"reply": "", "warnings": ["nothing to do"], "trace": {},
                 "iterations": 0, "stopped_because": "no instruction",
                 "replies": [], "session_id": session_id}
     return dict(result, iterations=iteration, stopped_because=stopped,
-                replies=replies)
+                ended_itself=ended_itself, actions=actions, replies=replies)
 
 
 class _Unobserved:

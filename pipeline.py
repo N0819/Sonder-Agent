@@ -831,11 +831,24 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
     # absent field stops rather than continues, so the way this mechanism
     # fails is by halting.
     continue_work = ""
+    next_action = ""
     if respond_ok:
         nxt = out.get("continue_work")
         if isinstance(nxt, dict):
             nxt = nxt.get("next")
         continue_work = str(nxt or "").strip()[:2000]
+        # WHAT THE STEP IS FOR, beside the step itself. Recorded, never
+        # graded: no threshold reads this today and none should until there
+        # is history to set one against. Every brake proposed for this loop
+        # was a guess about a field that had never been written down.
+        #
+        # It is also the only one of them that cannot misfire, which is why it
+        # is first: from outside, a run three iterations into a deliberate
+        # detour and a run going in circles are indistinguishable, and the
+        # cost of that ambiguity is paid by interrupting both.
+        next_action = str(out.get("next_action") or "").strip()[:600]
+        if next_action:
+            trace["next_action"] = next_action
     run.emit("respond", state="answered" if respond_ok else "no usable answer",
              ok=respond_ok,
              ponder=((out or {}).get("ponder") or {}).get("query") or "",
@@ -1553,6 +1566,7 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
 
     return {"reply": reply, "warnings": warnings, "trace": trace,
             "respond_ok": respond_ok, "continue_work": continue_work,
+            "next_action": next_action,
             "session_id": session_id, "turn_idx": turn_idx,
             "turn_id": turn_id}
 

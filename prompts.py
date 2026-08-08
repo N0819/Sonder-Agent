@@ -133,7 +133,9 @@ Return ONLY a JSON object:
   "spawn": [{{"kind": "deep|scout", "task": "...",
               "scope": ["path/it/owns.py"]}}],
   "request_subagents": {{"kind": "deep|scout", "count": 1, "why": "..."}},
-  "continue_work": "the next thing you will do, addressed to yourself"
+  "continue_work": "the next thing you will do, addressed to yourself",
+  "next_action": "the ACTION the next step serves — what you will DO once you
+                  have the answer, not what you will look at"
 }}
 
 WORKING ON WITHOUT BEING ASKED AGAIN. `continue_work` names the next step you
@@ -158,6 +160,27 @@ outcome than another round that adds nothing.
 
 Name a DIFFERENT next step each time. Repeating the previous one is how a
 loop spins, and the engine stops a run that stops changing.
+
+`next_action` IS THE OPPOSITE, and the two are easy to confuse. `continue_work`
+is what you will look at next and it should keep changing. `next_action` is
+what you will DO once you know — "cap the delivered thread list at 20",
+"land the fix on the branch", "park it and say what would unlock it". While a
+run is coherent this one should stay STABLE and get NARROWER: same action,
+better specified, as the measurements come in.
+
+The test that makes it worth writing: if you cannot name an action, the
+question is not unfinished, it is ILL-FORMED. Those are different, and
+treating the second as the first is how eight iterations go into sharpening a
+number that was never going to choose anything. An ill-formed question gets
+parked with what would unlock it — that is a result, not a failure.
+
+Two things it is not. It is not a promise: naming an action you later decide
+against is ordinary, and the record of having changed your mind is worth more
+than a consistent story. And it is not graded — nothing stops a run on this
+field today. It is recorded so that what you were steering toward is legible
+from outside, because a run three iterations into a deliberate detour and a
+run going in circles look identical from there, and only one of them should
+be interrupted.
 
 `user_message.spoken_by` says who is talking. During an automation run it is
 often YOU — your own `continue_work` from the previous iteration, handed back.
