@@ -1497,6 +1497,15 @@ def run_turn(user_text, session_id=None, run=None, speaker="user",
             outcome = memory.close_threads([str(t) for t in closing][:12],
                                            turn_idx)
             if outcome["closed"]:
+                # FORWARD-ONLY, AND THE SHAPE CHANGES HERE. From this turn on
+                # each entry is {thread, idx, open_since, of}: the thread's
+                # position in the delivered list, the turn it opened, and that
+                # list's length — so a closure can be normalised against a
+                # denominator that moves (42.5 slots on average historically,
+                # 87 now). Rows written before this are bare strings and stay
+                # uncomputable: close_threads deletes the thread from the row
+                # this payload was built from, so the position was already
+                # gone by the time the string was stored.
                 trace["closed_threads"] = outcome["closed"]
             for miss in outcome["unknown"]:
                 warnings.append(
