@@ -1507,7 +1507,12 @@ def fold_threads(threads, at_turn, previous=()):
 
 
 def close_threads(texts, turn_idx):
-    """Retire threads the turn has just answered. Returns {closed, unknown}.
+    """Retire threads the turn has just answered.
+
+    Returns {closed, unknown}. `closed` carries one object per thread —
+    {thread, idx, open_since, of} — where `idx` is its position in the
+    delivered list, `open_since` the turn it opened, and `of` that list's
+    length. `unknown` stays a list of the caller's own unmatched strings.
 
     NOTHING RE-READ CURRENT STATE. Threads were written once and only a
     consolidator — which runs every CONSOLIDATE_EVERY_TURNS turns — could ever
@@ -1536,11 +1541,34 @@ def close_threads(texts, turn_idx):
     threads = fold_threads(_json_list(row["unresolved_threads"]),
                            row["end_turn_idx"])
     keep = [t for t in threads if t["thread"] not in wanted]
-    closed = [t["thread"] for t in threads if t["thread"] in wanted]
+    # WHERE IT SAT, NOT ONLY THAT IT CLOSED. The text alone cannot say whether
+    # the threads that get answered concentrate at the top of the delivered
+    # list (cap it), at the top after re-ranking (re-rank it), or by age since
+    # opening (expire it) — and which of the three is true decides which change
+    # is the right one. It is not recoverable later, either: the UPDATE below
+    # deletes the thread from the very row the payload was assembled from, so
+    # the instrument destroys its own denominator at the instant it records the
+    # numerator. Measured on the live bank before this existed: position and
+    # open_since null for all 105 recorded closures.
+    #
+    # `of` travels with `idx` because a raw index is not comparable across
+    # time. This list has averaged 42.5 slots historically and holds 87 now, so
+    # index 20 is the bottom quarter in one window and the top quarter in
+    # another; recording the length is what lets a later reader normalise
+    # instead of computing a threshold against a moving denominator.
+    #
+    # FORWARD-ONLY. Everything already in `trace.closed_threads` is a bare
+    # string and stays uncomputable; this buys a clean numerator from here on,
+    # not a retrospective answer.
+    closed = [{"thread": t["thread"], "idx": i,
+               "open_since": int(t.get("since_turn") or 0),
+               "of": len(threads)}
+              for i, t in enumerate(threads) if t["thread"] in wanted]
     if closed:
         qi("UPDATE memory_summaries SET unresolved_threads=? WHERE id=?",
            (json.dumps(keep, ensure_ascii=False), row["id"]))
-    return {"closed": closed, "unknown": sorted(wanted - set(closed))}
+    return {"closed": closed,
+            "unknown": sorted(wanted - {c["thread"] for c in closed})}
 
 
 def _summary_retrieval_text(summary, key_phrases, unresolved_threads):

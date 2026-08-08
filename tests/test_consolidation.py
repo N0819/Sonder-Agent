@@ -243,7 +243,8 @@ def test_a_turn_can_close_a_thread_it_answered(temp_db):
         unresolved_threads=["how are the shown gists chosen?",
                             "what is the user actually building?"])
     outcome = memory.close_threads(["how are the shown gists chosen?"], 5)
-    assert outcome["closed"] == ["how are the shown gists chosen?"]
+    assert outcome["closed"] == [{"thread": "how are the shown gists chosen?",
+                                  "idx": 0, "open_since": 4, "of": 2}]
     assert outcome["unknown"] == []
     left = [t["thread"] for t
             in memory.get_memory_summary()["unresolved_threads"]]
