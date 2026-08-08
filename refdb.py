@@ -71,6 +71,31 @@ _SECRET_VALUE = re.compile(
     r"^(sk-|sk_live|pk_live|ghp_|gho_|ghu_|ghs_|github_pat_|xox[baprs]-|"
     r"AKIA|ASIA|AIza|glpat-|hf_|-----BEGIN)")
 
+# THE SAME ANNOUNCEMENT, ANYWHERE IN THE CELL. The three checks above all ask
+# what a cell IS — its column, its row key, what it starts with. None of them
+# sees a credential nested inside a document, and that is the shape the live
+# data actually takes: `assistant.db` holds one settings row, keyed
+# `providers`, whose value is a JSON blob carrying live provider keys. The
+# columns are `key` and `value`, `providers` matches no secret-key pattern,
+# and the anchor on `_SECRET_VALUE` never reaches past the opening brace.
+# Verified against the real row before this existed: all three returned False
+# with a credential-shaped token present. `4144d63` stopped this lane handing
+# back the engine's credentials; this is the same defect in a shape that fix
+# could not see.
+#
+# A TOKEN BODY IS REQUIRED, or an unanchored scan eats prose — and a false
+# positive here costs real data silently. The near-misses are ordinary
+# sentences: "sk- on its own", "AIza as a string", a column named `task_key`.
+# Eight token characters after the prefix separates a credential from a word.
+#
+# The WHOLE cell goes, not the matched span. Excising the key from a document
+# means parsing the document, and a parser that fails open on malformed JSON
+# leaks exactly the row most worth leaking.
+_SECRET_IN_TEXT = re.compile(
+    r"(sk-|sk_live|pk_live|ghp_|gho_|ghu_|ghs_|github_pat_|xox[baprs]-|"
+    r"AKIA|ASIA|AIza|glpat-|hf_)[A-Za-z0-9_\-]{8,}"
+    r"|-----BEGIN[A-Z ]*PRIVATE KEY")
+
 # Which column holds the row key, when the table is key/value shaped.
 _KEY_COLUMNS = ("key", "name", "setting", "option")
 
@@ -233,6 +258,11 @@ def _redact_row(columns, rendered):
             why = row_key
         elif _SECRET_VALUE.match(value):
             why = "credential-shaped value"
+        # Last, so a cell that any of the named checks already caught is
+        # reported by its NAME rather than by this one — the column or row key
+        # is the more useful thing to tell the reader.
+        elif _SECRET_IN_TEXT.search(value):
+            why = "credential inside the value"
         if why:
             rendered[i] = f"<redacted: {why[:60]}, {len(value)} chars>"
             hit.append(str(col))
