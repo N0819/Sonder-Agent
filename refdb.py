@@ -99,6 +99,49 @@ _SECRET_IN_TEXT = re.compile(
 # Which column holds the row key, when the table is key/value shaped.
 _KEY_COLUMNS = ("key", "name", "setting", "option")
 
+# TABLES A NAMED DATABASE MAY NOT HAND BACK, whatever the query says.
+#
+# `assistant.db` was exposed here so the assistant can COUNT ITS OWN TRACE —
+# whether a delivered `unresolved_thread` is ever used, how often a mechanism
+# fires against the opportunities it had. That is measurement, and it is the
+# whole point of the lane.
+#
+# `state` is different in kind. It holds the mind-model rows: standing
+# hypotheses about the user with confidences attached. A measurement
+# instrument that can read those becomes a mirror the assistant can tune
+# against — it could see which claims about the user are near a threshold and
+# write to move them, and the resulting belief would be indistinguishable from
+# one earned by evidence. The assistant asked for this boundary itself, before
+# running a single query, and asked for it in exactly those terms.
+#
+# IN CODE, NOT IN CONFIG. The exclusion has to be somewhere the query lane
+# cannot reach; `reference_databases` is a settings row, and a boundary stored
+# in the thing it guards is not a boundary.
+_CLOSED_TABLES = {
+    "assistant": ("state",),
+}
+
+
+def _closed_table_guard(name):
+    """An sqlite authorizer refusing reads of the closed tables, or None.
+
+    THE AUTHORIZER, NOT A SCAN OF THE SQL TEXT. A name-match over the
+    statement is defeated by every indirection sqlite offers — a subquery, a
+    CTE, a view defined over the table, `sqlite_master` re-read as a source.
+    The authorizer is consulted by the query planner as it compiles, so it
+    sees the tables actually touched rather than the ones spelled out, and
+    there is no phrasing that reaches a denied table without tripping it.
+    """
+    closed = {str(t).lower() for t in _CLOSED_TABLES.get(str(name), ())}
+    if not closed:
+        return None
+
+    def guard(action, arg1, _arg2, _dbname, _source):
+        if action == sqlite3.SQLITE_READ and str(arg1 or "").lower() in closed:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    return guard
+
 # One careless scan of a 699 MiB table holds the turn open for minutes, and the
 # assistant cannot know a table's size before it asks. The handler fires every
 # _PROGRESS_OPS virtual-machine instructions and aborts on wall clock, so a bad
@@ -307,6 +350,9 @@ def query(name, sql, max_rows=MAX_ROWS, max_chars=MAX_CHARS,
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         conn.set_progress_handler(
             lambda: 1 if time.monotonic() > deadline else 0, _PROGRESS_OPS)
+        guard = _closed_table_guard(name)
+        if guard is not None:
+            conn.set_authorizer(guard)
         cur = conn.execute(str(sql))
         columns = [d[0] for d in (cur.description or [])]
         rows, chars, truncated, why = [], 0, False, ""
@@ -345,6 +391,20 @@ def query(name, sql, max_rows=MAX_ROWS, max_chars=MAX_CHARS,
                              f"full scan"}
         return {"ok": False, "error": f"sqlite refused it: {exc}"}
     except sqlite3.Error as exc:
+        # A DENIED TABLE MUST SAY SO, and say it is deliberate. Sqlite's own
+        # wording is "access to state.value is prohibited", which reads like a
+        # file-permission fault on the database — and the reader's next move
+        # after that is to go looking for a broken instrument rather than to
+        # accept a boundary. Naming the closed tables costs nothing: their
+        # existence is already visible in `sqlite_master`, and what is being
+        # withheld is the rows.
+        closed = _CLOSED_TABLES.get(str(name)) or ()
+        if closed and "prohibited" in str(exc).lower():
+            return {"ok": False,
+                    "error": f"that reads a table this lane keeps closed on "
+                             f"{name!r}: {', '.join(sorted(closed))}. Not a "
+                             f"fault — the rows are withheld deliberately. "
+                             f"Everything else in the database is readable."}
         return {"ok": False, "error": f"sqlite refused it: {exc}"}
     finally:
         if conn is not None:
